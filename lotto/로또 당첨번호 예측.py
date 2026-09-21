@@ -25,6 +25,9 @@
 
 import os
 import json
+from lotto_validation import strict_int, validate_history, final_review
+from lotto_weekly import latest_completed_draw, verify_latest_result
+from lotto_portfolio import generate_prediction_sets as generate_main_hit_portfolio
 import math
 import sys
 import requests
@@ -215,7 +218,7 @@ def get_lotto_draw(draw_no, max_retries=3, retry_delay=1.0):
     """
 
     try:
-        draw_no = int(draw_no)
+        draw_no = strict_int(draw_no)
 
         if draw_no < 1:
             print(f"[조회 제외] 유효하지 않은 회차 : {draw_no}")
@@ -325,18 +328,18 @@ def get_lotto_draw(draw_no, max_retries=3, retry_delay=1.0):
             return None
 
         try:
-            returned_draw = int(item.get("ltEpsd", 0))
+            returned_draw = strict_int(item.get("ltEpsd", 0))
 
             result = {
                 "회차": returned_draw,
                 "날짜": item.get("ltRflYmd"),
-                "번호1": int(item.get("tm1WnNo")),
-                "번호2": int(item.get("tm2WnNo")),
-                "번호3": int(item.get("tm3WnNo")),
-                "번호4": int(item.get("tm4WnNo")),
-                "번호5": int(item.get("tm5WnNo")),
-                "번호6": int(item.get("tm6WnNo")),
-                "보너스": int(item.get("bnsWnNo")),
+                "번호1": strict_int(item.get("tm1WnNo")),
+                "번호2": strict_int(item.get("tm2WnNo")),
+                "번호3": strict_int(item.get("tm3WnNo")),
+                "번호4": strict_int(item.get("tm4WnNo")),
+                "번호5": strict_int(item.get("tm5WnNo")),
+                "번호6": strict_int(item.get("tm6WnNo")),
+                "보너스": strict_int(item.get("bnsWnNo")),
                 "1등당첨자수": item.get("rnk1WnNope"),
                 "1등당첨금": item.get("rnk1WnAmt"),
                 "1등총당첨금": item.get("rnk1SumWnAmt"),
@@ -425,6 +428,10 @@ def load_history_csv():
                 + ", ".join(missing_columns)
             )
             return pd.DataFrame()
+
+        # Validate raw values before numeric coercion can truncate fractions or
+        # silently discard conflicting/missing historical draws.
+        validate_history(df)
 
         for column in required_columns:
             df[column] = pd.to_numeric(
@@ -3302,7 +3309,7 @@ def _weighted_sample_without_replacement(
     return tuple(sorted(selected))
 
 
-def generate_prediction_sets(
+def _generate_prediction_sets_v1(
         df,
         set_count=PREDICTION_SET_COUNT,
         random_seed=None,
@@ -3528,6 +3535,21 @@ def generate_prediction_sets(
     return pd.DataFrame(rows)[
         ["세트"] + NUMBER_COLUMNS + ["조합점수"]
     ]
+
+
+def generate_prediction_sets(
+        df, set_count=PREDICTION_SET_COUNT, random_seed=None, target_draw=None,
+        method_performance_df=None, prediction_feedback=None, llm_audit=None
+):
+    """과거 시점별 보정 후 조건부 모델의 상위 6개 번호 조합을 생성합니다.
+
+    과거 호환 인수인 가중치/노출 피드백/LLM 제안은 이 모델에 적용하지 않습니다.
+    조합점수는 번호 포함 추정치 합이며 당첨확률이 아닙니다.
+    """
+    return generate_main_hit_portfolio(
+        df, calculate_analysis_scores, set_count=set_count,
+        random_seed=random_seed, target_draw=target_draw
+    )
 
 
 def _empty_prediction_history():
@@ -4354,6 +4376,8 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
     최신 회차 다음 회차의 예측이 없을 때만 새 10세트를 추가합니다.
     """
 
+    validate_history(df)
+    verify_latest_result(df, get_lotto_draw, expected_round=latest_completed_draw())
     latest_round = int(df["회차"].max())
     target_draw = latest_round + 1
     prediction_history = load_prediction_history(
@@ -4387,40 +4411,30 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if generated_now:
-        method_performance_df = backtest_analysis_methods(df)
-        method_performance_df = apply_live_method_feedback(
-            method_performance_df,
-            live_method_feedback
-        )
-        llm_payload = build_llm_audit_payload(
-            target_draw,
-            method_performance_df,
-            live_method_feedback,
-            prediction_feedback
-        )
-        llm_audit = request_llm_weight_audit(
-            llm_payload,
-            allowed_methods=method_performance_df["분석기법"]
-        )
-        method_performance_df = apply_llm_method_audit(
-            method_performance_df,
-            llm_audit
-        )
         generated_prediction = generate_prediction_sets(
             df,
             set_count=PREDICTION_SET_COUNT,
-            target_draw=target_draw,
-            method_performance_df=method_performance_df,
-            prediction_feedback=prediction_feedback,
-            llm_audit=llm_audit
+            target_draw=target_draw
         )
+
+        weekly_report = generated_prediction.attrs["weekly_review"]
+        previous = prediction_history[prediction_history["예측회차"] == latest_round]
+        weekly_report["previous_prediction_evaluation"] = {
+            "draw": latest_round,
+            "available": not previous.empty,
+            "sets": len(previous),
+            "main_hits": pd.to_numeric(previous["본번호일치수"], errors="coerce").dropna().astype(int).tolist(),
+            "limits": "저장 시점이 확인되지 않는 기록은 사전 예측 성과를 입증하지 않습니다.",
+        }
+        _write_json_file(os.path.join(os.path.dirname(os.path.abspath(filename)),
+                                     f"주간분석검토_{target_draw}.json"), weekly_report)
 
         current_prediction = generated_prediction[
             ["세트"] + NUMBER_COLUMNS
         ].copy()
         current_prediction["예측회차"] = target_draw
         current_prediction["종합점수"] = (
-            generated_prediction["조합점수"] / 100
+            generated_prediction["조합점수"]
         ).round(6)
 
         for index in range(1, 7):
@@ -4435,13 +4449,6 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
         prediction_history = pd.concat(
             [prediction_history, current_prediction],
             ignore_index=True
-        )
-
-        _save_method_performance(
-            method_performance_df,
-            target_draw=target_draw,
-            base_draw=latest_round,
-            created_at=created_at
         )
 
     target_forecasts = method_forecast_history[
@@ -4484,6 +4491,17 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
             manual_payload,
             allowed_methods=manual_performance_df["분석기법"]
         )
+
+    final_audit = final_review(
+        df, current_prediction, prediction_history, get_lotto_draw,
+        os.path.dirname(os.path.abspath(filename)),
+        expected_count=PREDICTION_SET_COUNT
+    )
+    if final_audit["status"] in {"validation_error", "source_mismatch", "reject"}:
+        raise ValueError("최종 번호 검증 실패: GPT최종검증결과.json을 확인하세요.")
+    print(f"GPT 최종 번호 검증: {final_audit['status']}")
+    if not final_audit["finalized"]:
+        print("아래 번호는 검증 대기 후보이며 GPT 최종 확정 번호가 아닙니다.")
 
     prediction_history = prediction_history.sort_values(
         ["예측회차", "세트"]
@@ -4540,8 +4558,11 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
             columns={"가중치": "가중치(%)"}
         )
         print(performance_display.to_string(index=False))
-    else:
+    elif not generated_now:
         print("이미 저장된 예측이 있어 새 세트를 중복 생성하지 않았습니다.")
+    else:
+        print("본번호 보정·최대 적중 효용 모델로 생성했습니다.")
+        print("종합점수는 모델의 본번호 포함 추정치 합이며 1등 당첨확률이 아닙니다.")
 
     print()
     print(
@@ -4571,7 +4592,7 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
     print()
     print(f"회차별 예상번호/평가 이력 저장 완료 : {filename}")
 
-    if generated_now:
+    if generated_now and method_performance_df is not None:
         print(f"분석기법 성과 이력 저장 완료 : {METHOD_PERFORMANCE_FILE}")
 
     print(f"실전 예측 피드백 저장 완료 : {PREDICTION_FEEDBACK_FILE}")
@@ -4700,6 +4721,8 @@ def main():
     # --------------------------------------------------------
 
     query_round = QUERY_ROUND
+    if query_round <= 0:
+        query_round = latest_completed_draw()
 
     if len(sys.argv) >= 2:
         try:

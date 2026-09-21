@@ -1,0 +1,70 @@
+{
+  "version": "weekly_review_v4",
+  "history_sha256": "3d5b3cdf854f5b52e30a0bc2feb66a5a06b5ce7d4f9855f5c3f1e7a496e05118",
+  "target_draw": 1243,
+  "review_rounds": [
+    1219,
+    1220,
+    1221,
+    1222,
+    1223,
+    1224,
+    1225,
+    1226,
+    1227,
+    1228,
+    1229,
+    1230,
+    1231,
+    1232,
+    1233,
+    1234,
+    1235,
+    1236,
+    1237,
+    1238,
+    1239,
+    1240,
+    1241,
+    1242
+  ],
+  "selected_strength": 0.0,
+  "candidate_strengths": [
+    0.0,
+    0.25,
+    0.5,
+    1.0
+  ],
+  "mean_brier_losses": [
+    0.11555555555555554,
+    0.11553894818125461,
+    0.11552533355507962,
+    0.11550708254710733
+  ],
+  "last_draw_brier_losses": [
+    0.11555555555555558,
+    0.11565982666011518,
+    0.11576867918514377,
+    0.11600012849660797
+  ],
+  "reason": "paired_one_standard_error",
+  "limits": "Retrospective tuning, not held-out proof of improvement or winning probabilities.",
+  "previous_prediction_evaluation": {
+    "draw": 1242,
+    "available": true,
+    "sets": 10,
+    "main_hits": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "limits": "저장 시점이 확인되지 않는 기록은 사전 예측 성과를 입증하지 않습니다."
+  }
+}
