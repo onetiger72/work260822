@@ -4,7 +4,6 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 
 NUMBERS = [f"번호{i}" for i in range(1, 7)]
 
@@ -110,9 +109,9 @@ def validate_review(review, payload, fingerprint):
     return review
 
 
-def final_review(history, candidates, predictions, fetch_draw, directory, client=None, expected_count=10):
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+def final_review(history, candidates, predictions, fetch_draw, client=None, expected_count=10,
+                 manual_review=None):
+    """Return the review and manual request in memory; never read/write files."""
     result = {"status": "pending", "finalized": False,
               "checked_at": datetime.now(timezone.utc).isoformat()}
     try:
@@ -126,7 +125,7 @@ def final_review(history, candidates, predictions, fetch_draw, directory, client
                         "Return the exact input_sha256, target_draw and all checked_set_ids.")
         request = {"instructions": instructions, "input_sha256": fingerprint,
                    "payload": payload, "response_schema": review_schema()}
-        write_json(directory / "GPT최종검증요청.json", request)
+        result["request"] = request
         mode = os.getenv("LOTTO_FINAL_REVIEW_MODE", "manual").strip().lower()
         if mode not in {"manual", "api"}:
             raise ValueError("LOTTO_FINAL_REVIEW_MODE must be manual or api")
@@ -134,15 +133,13 @@ def final_review(history, candidates, predictions, fetch_draw, directory, client
             result["status"] = "source_mismatch"
         elif mode == "manual":
             result["status"] = "manual_review_pending"
-            proposal = directory / "GPT최종검증제안.json"
-            if proposal.exists():
-                raw_review = json.loads(proposal.read_text(encoding="utf-8"))
-                if isinstance(raw_review, dict) and raw_review.get("input_sha256") != fingerprint:
+            if manual_review is not None:
+                if isinstance(manual_review, dict) and manual_review.get("input_sha256") != fingerprint:
                     # Regenerating a batch invalidates the old review; request a
                     # new one without treating an otherwise valid batch as bad.
                     result["status"] = "manual_review_pending_stale_proposal"
                 else:
-                    result["review"] = validate_review(raw_review, payload, fingerprint)
+                    result["review"] = validate_review(manual_review, payload, fingerprint)
         elif client is None and not os.getenv("OPENAI_API_KEY"):
             result["status"] = "missing_api_key"
         else:
@@ -167,11 +164,16 @@ def final_review(history, candidates, predictions, fetch_draw, directory, client
                 result["status"] = "source_unverified"
     except Exception as error:
         result.update(status="validation_error", error_type=type(error).__name__, finalized=False)
-    write_json(directory / "GPT최종검증결과.json", result)
     return result
 
 
-def write_json(path, value):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+def print_review(result):
+    """Expose status and the exact request for file-free manual review."""
+    print(f"GPT 최종 번호 검증: {result['status']} (finalized={result['finalized']})")
+    if result["status"].startswith("manual_review_pending"):
+        print("수동 검토 요청 (검토 응답은 --manual-response의 표준입력으로 전달):")
+        print(json.dumps(result["request"], ensure_ascii=False, indent=2))
+    if "review" in result:
+        print(json.dumps(result["review"], ensure_ascii=False, indent=2))
+    if "error_type" in result:
+        print(f"검증 오류: {result['error_type']}")

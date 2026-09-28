@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 
 from lotto_portfolio import (NUMBER_COLUMNS, VERSION, generate_prediction_sets,
-                             history_fingerprint, load_feature_cache, summarize, ticket_hits)
+                             history_fingerprint, summarize, ticket_hits)
+from lotto_validation import validate_history
 
 
 def main():
@@ -16,7 +17,9 @@ def main():
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
     history = pd.read_csv(app.CSV_FILE, encoding="utf-8-sig")
-    cache = load_feature_cache(base / "analysis_cache" / "method_scores.json")
+    validate_history(history)
+    history = history.sort_values("회차").reset_index(drop=True)
+    cache = {}
     records = []
     # Many random repetitions make the same-budget baseline less seed-sensitive.
     uniform_repetitions = [[] for _ in range(100)]
@@ -42,8 +45,8 @@ def main():
               "uniform_100_runs": {"mean_ticket_hits": float(np.mean([s["mean_ticket_hits"] for s in summaries])),
                                    "mean_best_hits": float(np.mean([s["mean_best_hits"] for s in summaries])),
                                    "mean_draws_at_least": {str(n): float(np.mean([s["draws_at_least"][str(n)] for s in summaries])) for n in range(3, 7)}}}
-    (base / "portfolio_evaluation.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: v for k, v in report.items() if k != "new_records"}, ensure_ascii=True), flush=True)
+    return report
 
 
 if __name__ == "__main__":

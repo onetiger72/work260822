@@ -26,9 +26,11 @@ class ValidationTests(unittest.TestCase):
                 proposal.update(reply)
             return SimpleNamespace(status="completed", output_text=json.dumps(proposal))
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOTTO_FINAL_REVIEW_MODE": "api"}):
-            return final_review(self.history, self.candidates, pd.DataFrame(),
-                                lambda _: self.draw if source else None, folder,
-                                SimpleNamespace(responses=SimpleNamespace(create=create)), expected_count=1)
+            result = final_review(self.history, self.candidates, pd.DataFrame(),
+                                  lambda _: self.draw if source else None,
+                                  client=SimpleNamespace(responses=SimpleNamespace(create=create)), expected_count=1)
+            self.assertEqual(list(Path(folder).iterdir()), [])
+            return result
 
     def test_fraction_bool_and_nonfinite_rejected(self):
         for value in [1.5, True, float("nan"), float("inf"), "2.4"]:
@@ -65,9 +67,26 @@ class ValidationTests(unittest.TestCase):
     def test_api_failure(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOTTO_FINAL_REVIEW_MODE": "api"}):
             result = final_review(self.history, self.candidates, pd.DataFrame(), lambda _: self.draw,
-                                  folder, SimpleNamespace(), expected_count=1)
+                                  client=SimpleNamespace(), expected_count=1)
             self.assertFalse(result["finalized"])
             self.assertEqual(result["status"], "validation_error")
+
+    def test_manual_review_round_trip_without_files_and_stale_response_rejected(self):
+        with patch.dict(os.environ, {"LOTTO_FINAL_REVIEW_MODE": "manual"}):
+            pending = final_review(self.history, self.candidates, pd.DataFrame(),
+                                   lambda _: self.draw, expected_count=1)
+            self.assertEqual(pending["status"], "manual_review_pending")
+            request = pending["request"]
+            proposal = {"input_sha256": request["input_sha256"], "target_draw": 2,
+                        "verdict": "pass", "reason": "Checked all sets", "checked_set_ids": [1]}
+            passed = final_review(self.history, self.candidates, pd.DataFrame(),
+                                  lambda _: self.draw, expected_count=1, manual_review=proposal)
+            self.assertTrue(passed["finalized"])
+            proposal["input_sha256"] = "stale"
+            stale = final_review(self.history, self.candidates, pd.DataFrame(),
+                                 lambda _: self.draw, expected_count=1, manual_review=proposal)
+            self.assertFalse(stale["finalized"])
+            self.assertEqual(stale["status"], "manual_review_pending_stale_proposal")
 
 
 if __name__ == "__main__":

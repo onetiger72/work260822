@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 import lotto_portfolio as current
-from lotto_validation import validate_draw, validate_history, write_json
+from lotto_validation import validate_history
 
 
 def load_module(name, path):
@@ -22,11 +22,6 @@ def main():
     app = load_module("audit_app", base / "로또 당첨번호 예측.py")
     old = load_module("portfolio_v4", base / "analysis_cache/portfolio_v4.py")
     history = pd.read_csv(app.CSV_FILE, encoding="utf-8-sig")
-    snapshot = base / "analysis_cache/latest_official_draw.json"
-    if snapshot.exists():
-        row = validate_draw(json.loads(snapshot.read_text(encoding="utf-8")))
-        if row["회차"] == int(history["회차"].max()) + 1:
-            history = pd.concat([history, pd.DataFrame([row])], ignore_index=True)
     validate_history(history)
     history = history.sort_values("회차").reset_index(drop=True)
     # Fresh cache, shared only across immutable prefixes in this process.
@@ -63,8 +58,8 @@ def main():
               "uniform_100_runs": {key: float(np.mean([s[key] for s in summaries]))
                                    for key in ["mean_ticket_hits", "mean_best_hits", "zero_hit_draws"]},
               "records": records}
-    write_json(base / "실행전비교.json", report)
     print(json.dumps({k: v for k, v in report.items() if k != "records"}, ensure_ascii=True), flush=True)
+    return report
 
 
 if __name__ == "__main__":

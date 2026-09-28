@@ -14,7 +14,6 @@ BASE = Path(__file__).resolve().parent
 CACHE = BASE / "analysis_cache"
 SOURCE = CACHE / "legacy_app.py"
 HISTORY = BASE / "과거로또 당첨번호.csv"
-OUTPUT = BASE / "legacy_holdout.json"
 
 
 def main():
@@ -24,7 +23,10 @@ def main():
     spec.loader.exec_module(app)
     app.CSV_FILE = str(HISTORY)
     history = app.load_history_csv().sort_values("회차").reset_index(drop=True)
-    assert int(history["회차"].max()) == 1240
+    # Preserve the original comparison range as newer draws arrive.
+    history = history[history["회차"] <= 1240].reset_index(drop=True)
+    if int(history["회차"].max()) != 1240:
+        raise ValueError("legacy comparison requires history through draw 1240")
     assert app.PREDICTION_CANDIDATE_ATTEMPTS == 15000
     original_scores = app.calculate_analysis_scores
     score_cache = {}
@@ -33,9 +35,6 @@ def main():
         score_cache[train_length] = original_scores(history.iloc[:train_length])
         if (train_length - start_length) % 20 == 0:
             print(f"score cache {train_length}/{len(history)}, seconds={time.perf_counter()-started:.1f}", flush=True)
-    score_path = CACHE / "method_scores.json"
-    score_path.write_text(json.dumps(score_cache, ensure_ascii=False), encoding="utf-8")
-    print(f"SCORE_CACHE_READY {score_path}, seconds={time.perf_counter()-started:.1f}", flush=True)
 
     def cached_scores(frame):
         if len(frame) in score_cache:
@@ -49,7 +48,7 @@ def main():
     source_hash = hashlib.sha256(SOURCE.read_bytes()).hexdigest()
     history_hash = hashlib.sha256(HISTORY.read_bytes()).hexdigest()
 
-    def save():
+    def summarize():
         rows = len(records)
         payload = {
             "label": "legacy full 10-ticket chronological evaluation",
@@ -73,7 +72,7 @@ def main():
             "tickets_hits_exactly": {str(k): sum(x["hits"].count(k) for x in records) for k in range(7)},
             "rounds": records,
         }
-        OUTPUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return payload
 
     for target in range(1181, 1241):
         round_started = time.perf_counter()
@@ -94,9 +93,10 @@ def main():
             "mean_hits": sum(hits) / len(hits), "best_hits": max(hits),
             "runtime_seconds": round(time.perf_counter() - round_started, 3),
         })
-        save()
         print(f"legacy target={target} best={max(hits)} mean={sum(hits)/10:.2f} total_seconds={time.perf_counter()-started:.1f}", flush=True)
-    print(f"BENCHMARK_COMPLETE {OUTPUT}", flush=True)
+    report = summarize()
+    print(json.dumps({k: v for k, v in report.items() if k != "rounds"}, ensure_ascii=False, indent=2), flush=True)
+    return report
 
 
 if __name__ == "__main__":

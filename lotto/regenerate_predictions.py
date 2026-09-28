@@ -1,25 +1,28 @@
 """Prepare an auditable replacement batch without deleting existing predictions.
 
-Run: python -B lotto/regenerate_predictions.py --target 1241
-The replacement builder consumes regenerated_1241.json after GPT review.
+Run with --target set to the next unobserved draw, never a completed draw.
+Prepared candidates and review results are returned in memory and printed.
 """
 import argparse
 import hashlib
 import importlib.util
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from lotto_portfolio import VERSION
-from lotto_validation import final_review, validate_history
+from lotto_validation import final_review, validate_history, print_review
 from lotto_weekly import latest_completed_draw, verify_latest_result
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", type=int, required=True)
+    parser.add_argument("--manual-response", action="store_true",
+                        help="Read the manual review object from stdin")
     args = parser.parse_args()
     base = Path(__file__).resolve().parent
     app_path = base / "로또 당첨번호 예측.py"
@@ -48,13 +51,15 @@ def main():
                 "columns": app.PREDICTION_FILE_COLUMNS, "rows": rows,
                 "weekly_review": generated.attrs["weekly_review"],
                 "score_semantics": "model-estimated main hits per ticket, not a jackpot probability"}
-    (base / f"regenerated_{args.target}.json").write_text(
-        json.dumps(prepared, ensure_ascii=False, indent=2), encoding="utf-8")
-    result = final_review(history, pd.DataFrame(rows), predictions, app.get_lotto_draw, base)
-    print("review_status:", result["status"], "finalized:", result["finalized"])
+    proposal = json.load(sys.stdin) if args.manual_response else None
+    result = final_review(history, pd.DataFrame(rows), predictions, app.get_lotto_draw,
+                          manual_review=proposal)
+    print(json.dumps(prepared, ensure_ascii=False, indent=2))
+    print_review(result)
     print(generated.to_string(index=False))
     if Path(app.PREDICTION_FILE).read_bytes() != original_bytes:
         raise RuntimeError("prediction file changed during preparation")
+    return {"prepared": prepared, "review": result}
 
 
 if __name__ == "__main__":

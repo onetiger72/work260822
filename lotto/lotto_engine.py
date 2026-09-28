@@ -16,7 +16,6 @@ from itertools import combinations
 
 CSV_FILE = "과거로또 당첨번호.csv"
 PREDICTION_FILE = "당첨예상번호.csv"
-METHOD_PERFORMANCE_FILE = "분석기법성과.csv"
 
 NUMBER_COLUMNS = ["번호1", "번호2", "번호3", "번호4", "번호5", "번호6"]
 ALL_COLUMNS = ["회차", "날짜"] + NUMBER_COLUMNS + ["보너스"]
@@ -559,7 +558,6 @@ def run_backtest(df, backtest_draws=120, min_train_draws=150, progress_callback=
         r["가중치"] = round(r.pop("조정성능") / tot_perf, 4)
         
     perf_df = pd.DataFrame(records)
-    perf_df.to_csv(METHOD_PERFORMANCE_FILE, index=False, encoding="utf-8-sig")
     
     if progress_callback:
         progress_callback(100, "백테스트 완료!")

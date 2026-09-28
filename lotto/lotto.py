@@ -1779,23 +1779,7 @@ def save_prediction_sets(
         and "예측회차"
         not in existing_prediction_df.columns
     ):
-        backup_filename = (
-            "당첨예상번호_예측회차없음_백업.csv"
-        )
-
-        existing_prediction_df.to_csv(
-            backup_filename,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-        print()
-        print(
-            f"기존 예상번호 파일에 예측회차가 없어 "
-            f"{backup_filename}으로 백업했습니다."
-        )
-
-        existing_prediction_df = pd.DataFrame()
+        raise ValueError("기존 예상번호 파일에 예측회차가 없어 저장을 중단합니다.")
 
     # 이미 다음 회차 예상번호가 있으면 그대로 유지
     if (

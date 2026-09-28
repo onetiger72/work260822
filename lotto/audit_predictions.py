@@ -2,13 +2,14 @@
 import argparse
 import hashlib
 import importlib.util
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 from lotto_portfolio import NUMBER_COLUMNS, portfolio_diagnostics, review_probabilities, ticket_hits
-from lotto_validation import strict_int, validate_draw, validate_history, write_json
+from lotto_validation import strict_int, validate_draw, validate_history
 from lotto_weekly import latest_completed_draw
 
 
@@ -90,9 +91,7 @@ def audit(app, offline=False):
               if prediction_path.exists() else None,
               "comparisons": comparisons, "logic_review": review,
               "limits": "CSV files are unchanged. Historical replay is not proof of pre-draw predictions or future superiority."}
-    output = history_path.parent / "실행전점검.json"
-    write_json(output, report)
-    print(f"Audit saved: {output.name}; official_status={official_status}", flush=True)
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return report
 
 

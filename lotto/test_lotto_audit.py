@@ -58,6 +58,7 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(report["logic_review"]["target_draw"], 5)
             self.assertEqual([c.args[0] for c in app.get_lotto_draw.call_args_list], [3, 4])
             self.assertEqual(before, [p.read_bytes() for p in (history_path, prediction_path)])
+            self.assertEqual({p.name for p in root.iterdir()}, {"history.csv", "predictions.csv"})
             app.generate_prediction_sets.assert_not_called()
             app.get_lotto_draw.return_value = None
             app.get_lotto_draw.side_effect = None
@@ -65,6 +66,7 @@ class AuditTests(unittest.TestCase):
                 report = audit(app)
             self.assertFalse(report["ready_for_generation"])
             self.assertEqual(report["official_status"], "unavailable")
+            self.assertEqual({p.name for p in root.iterdir()}, {"history.csv", "predictions.csv"})
 
     def test_duplicate_and_fractional_saved_numbers_are_rejected(self):
         history = dated_history(3)

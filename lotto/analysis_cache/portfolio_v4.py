@@ -7,8 +7,6 @@ The older simulation selector is retained for comparative evaluation.
 """
 import hashlib
 import heapq
-import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -237,10 +235,3 @@ def summarize(records):
     return {"draws": len(records), "mean_ticket_hits": float(np.mean([row["hits"] for row in records])),
             "mean_best_hits": float(np.mean(best)),
             "draws_at_least": {str(n): sum(h >= n for h in best) for n in range(3, 7)}}
-
-
-def load_feature_cache(path):
-    # The caller must bind this cache to the same immutable historical prefix.
-    source = json.loads(Path(path).read_text(encoding="utf-8"))
-    return {int(length): {m: {int(n): v for n, v in scores.items()} for m, scores in methods.items()}
-            for length, methods in source.items()}
