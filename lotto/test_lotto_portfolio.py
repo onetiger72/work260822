@@ -93,8 +93,8 @@ class TicketTests(unittest.TestCase):
     def test_ranked_sets_match_exhaustive_model_optimum_and_repeat_core(self):
         probabilities = np.full(45, 0.00001)
         probabilities[:9] = np.linspace(0.29, 0.12, 9)
-        result = portfolio.select_portfolio(probabilities, seed=1)
-        other = portfolio.select_portfolio(probabilities, seed=999)
+        result = portfolio.select_ranked_portfolio(probabilities, seed=1)
+        other = portfolio.select_ranked_portfolio(probabilities, seed=999)
         pd.testing.assert_frame_equal(result, other)
         odds = probabilities / (1 - probabilities)
         exhaustive = sorted(combinations(range(9), 6),
@@ -125,6 +125,16 @@ class TicketTests(unittest.TestCase):
         self.assertTrue(((numbers >= 1) & (numbers <= 45)).all())
         self.assertTrue((np.diff(numbers, axis=1) > 0).all())
         self.assertEqual(len({tuple(row) for row in numbers}), 10)
+
+    def test_balancing_prevents_uniform_and_extreme_score_concentration(self):
+        for probabilities in [np.full(45, 6 / 45), np.linspace(0.04, 0.30, 45)]:
+            for seed in range(20):
+                result = portfolio.select_portfolio(probabilities, seed=seed)
+                numbers = result[portfolio.NUMBER_COLUMNS].to_numpy()
+                diagnostics = portfolio.portfolio_diagnostics(numbers)
+                self.assertEqual(diagnostics["unique_numbers"], 45)
+                self.assertEqual(diagnostics["max_number_exposure"], 2)
+                self.assertLessEqual(diagnostics["max_pairwise_overlap"], 2)
 
     def test_invalid_probabilities_and_ticket_count_are_rejected(self):
         for probabilities in [np.ones(44) / 7, np.full(45, np.nan), np.zeros(45), np.ones(45)]:

@@ -10,8 +10,8 @@
 # 6. 최근 100회 출현빈도 분석
 # 7. 번호별 마지막 출현 이후 경과회차 계산
 # 8. 기존 예상번호와 실제 당첨번호 자동 비교
-# 9. 13개 분석기법의 순차 백테스트·최근 2회 보강·성과 가중 앙상블
-# 10. 본번호/보너스 관계와 경험분포 기반 15,000개 후보 조합 평가
+# 9. 기법별 사전 검증과 별도 구간의 결합 모델 반영 강도 검증
+# 10. 본번호 중심 보정 및 10세트 번호 노출 분산
 # 11. 회차별 예상번호 및 분석기법 성과 누적 저장
 #
 # 실행 예시
@@ -54,7 +54,7 @@ LLM_AUDIT_FILE = os.path.join(BASE_DIR, "LLM분석감사.json")
 LLM_AUDIT_REQUEST_FILE = os.path.join(BASE_DIR, "LLM감사요청.json")
 LLM_AUDIT_PROPOSAL_FILE = os.path.join(BASE_DIR, "LLM감사제안.json")
 
-# 0이면 기존 CSV만 사용합니다. 새 회차를 자동 수집하려면 회차를 입력하세요.
+# 0이면 한국 시간 기준 최신 완료 회차까지 자동 수집합니다.
 # 예: QUERY_ROUND = 1238
 QUERY_ROUND = 0
 
@@ -3541,7 +3541,7 @@ def generate_prediction_sets(
         df, set_count=PREDICTION_SET_COUNT, random_seed=None, target_draw=None,
         method_performance_df=None, prediction_feedback=None, llm_audit=None
 ):
-    """과거 시점별 보정 후 조건부 모델의 상위 6개 번호 조합을 생성합니다.
+    """기법별 순차 검증 후 번호 노출을 분산한 6개 번호 조합을 생성합니다.
 
     과거 호환 인수인 가중치/노출 피드백/LLM 제안은 이 모델에 적용하지 않습니다.
     조합점수는 번호 포함 추정치 합이며 당첨확률이 아닙니다.
@@ -4561,7 +4561,7 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
     elif not generated_now:
         print("이미 저장된 예측이 있어 새 세트를 중복 생성하지 않았습니다.")
     else:
-        print("본번호 보정·최대 적중 효용 모델로 생성했습니다.")
+        print("기법별 사전 검증·반영 강도 검증·번호 노출 분산 방식으로 생성했습니다.")
         print("종합점수는 모델의 본번호 포함 추정치 합이며 1등 당첨확률이 아닙니다.")
 
     print()
@@ -4570,7 +4570,7 @@ def save_prediction_sets(df, filename=PREDICTION_FILE):
         f"평가 {prediction_feedback['evaluated_draws']}회, "
         f"평균 적중 {prediction_feedback['mean_main_hits']:.3f}개, "
         f"Brier skill {prediction_feedback['mean_brier_skill']:.4f}, "
-        "다양성 보강계수 "
+        "과거 방식의 참고용 다양성 계수(현재 생성기에 미적용) "
         f"{prediction_feedback['diversity_penalty_multiplier']:.4f}"
     )
 
@@ -4714,6 +4714,11 @@ def print_summary(
 # ============================================================
 
 def main():
+
+    if "--audit-only" in sys.argv:
+        from audit_predictions import audit
+        audit(sys.modules[__name__], offline="--offline" in sys.argv)
+        return
 
     # --------------------------------------------------------
     # STEP 1

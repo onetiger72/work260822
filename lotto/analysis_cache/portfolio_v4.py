@@ -2,8 +2,8 @@
 
 All historical feature rows are computed before their labeled draw. Coefficients
 are regularized toward the uniform 6/45 baseline. No number-pattern exclusions.
-Default selection spreads exposure across the batch after method screening.
-The older ranked and simulation selectors are retained for comparison only.
+Default selection ranks exact six-number sets without random sampling.
+The older simulation selector is retained for comparative evaluation.
 """
 import hashlib
 import heapq
@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 NUMBER_COLUMNS = [f"번호{i}" for i in range(1, 7)]
-VERSION = "screened_balanced_v5"
+VERSION = "weekly_review_v4"
 CALIBRATION_DRAWS = 120
 RIDGE = 120.0
 # Convex gain gives progressively greater value to approaching six main hits.
@@ -52,7 +52,7 @@ def fit_inclusion_probabilities(features, outcomes, current):
     return np.clip(q + (low + high) / 2, 0.04, 0.30)
 
 
-def calibrated_probabilities(df, calculate_scores, cache=None, methods=None):
+def calibrated_probabilities(df, calculate_scores, cache=None):
     """For target n+1: train feature at length t against row t, t < n."""
     cache = {} if cache is None else cache
     n = len(df)
@@ -65,9 +65,7 @@ def calibrated_probabilities(df, calculate_scores, cache=None, methods=None):
         return cache[length]
 
     current_scores = scores_at(n)
-    methods = sorted(m for m in current_scores if m != "보너스보조신호") if methods is None else list(methods)
-    if not methods:
-        return np.full(45, 6 / 45)
+    methods = sorted(m for m in current_scores if m != "보너스보조신호")
 
     def matrix(length):
         scores = scores_at(length)
@@ -88,56 +86,6 @@ def sample_tickets(rng, weights, count):
     return np.sort(np.argpartition(races, 5, axis=1)[:, :6], axis=1)
 
 
-def screen_methods(df, calculate_scores, cache=None, screen_draws=24):
-    """Retain individually calibrated signals only with >2 paired SE gain.
-
-    This window ends before the subsequent strength-review window. A removed
-    method contributes no feature to the final fit and is reconsidered next run.
-    Screening is a conservative tuning heuristic, not a significance claim.
-    """
-    cache = {} if cache is None else cache
-    start = max(151, len(df) - screen_draws)
-    if len(df) not in cache:
-        cache[len(df)] = calculate_scores(df)
-    methods = sorted(m for m in cache[len(df)] if m != "보너스보조신호")
-    selected, reports = [], []
-    gains_by_method = {method: [] for method in methods}
-    matrices = {}
-
-    def matrix(t):
-        if t not in matrices:
-            if t not in cache:
-                cache[t] = calculate_scores(df.iloc[:t])
-            matrices[t] = np.array([[cache[t][m][n] for m in methods] for n in range(1, 46)])
-        return matrices[t]
-
-    for t in range(start, len(df)) if methods else []:
-        train_start = max(150, t - CALIBRATION_DRAWS)
-        features = np.array([matrix(k) for k in range(train_start, t)])
-        outcomes = np.zeros((t - train_start, 45))
-        actual_numbers = df.iloc[train_start:t][NUMBER_COLUMNS].to_numpy(dtype=int) - 1
-        outcomes[np.arange(len(outcomes))[:, None], actual_numbers] = 1
-        actual = np.zeros(45)
-        actual[df.iloc[t][NUMBER_COLUMNS].to_numpy(dtype=int) - 1] = 1
-        for index, method in enumerate(methods):
-            q = fit_inclusion_probabilities(features[:, :, index:index + 1], outcomes,
-                                            matrix(t)[:, index:index + 1])
-            gains_by_method[method].append(float(np.mean((6 / 45 - actual) ** 2) - np.mean((q - actual) ** 2)))
-    for method in methods:
-        gains = gains_by_method[method]
-        mean = float(np.mean(gains)) if gains else 0.0
-        se = float(np.std(gains, ddof=1) / np.sqrt(len(gains))) if len(gains) >= 2 else None
-        active = len(gains) >= 12 and mean > 2 * se + 1e-12
-        if active:
-            selected.append(method)
-        reports.append({"method": method, "enabled": active, "mean_brier_gain": mean,
-                        "paired_standard_error": se, "reason": "gain_above_two_se" if active
-                        else "insufficient_history" if len(gains) < 12 else "no_reliable_gain"})
-    return selected, {"rounds": df.iloc[start:]["회차"].astype(int).tolist(),
-                      "selected_methods": selected, "methods": reports,
-                      "excluded_by_policy": ["보너스보조신호"]}
-
-
 def review_probabilities(df, calculate_scores, cache=None, review_draws=24):
     """Choose signal strength using strictly past, rolling Brier losses.
 
@@ -148,10 +96,8 @@ def review_probabilities(df, calculate_scores, cache=None, review_draws=24):
     strengths = np.array([0.0, 0.25, 0.5, 1.0])
     losses, rounds = [], []
     base = np.full(45, 6 / 45)
-    review_start = max(151, len(df) - review_draws)
-    methods, method_report = screen_methods(df.iloc[:min(review_start, len(df))], calculate_scores, cache)
-    for t in range(review_start, len(df)):
-        q = calibrated_probabilities(df.iloc[:t], calculate_scores, cache, methods=methods)
+    for t in range(max(151, len(df) - review_draws), len(df)):
+        q = calibrated_probabilities(df.iloc[:t], calculate_scores, cache)
         actual = np.zeros(45)
         actual[df.iloc[t][NUMBER_COLUMNS].to_numpy(dtype=int) - 1] = 1
         candidates = base + strengths[:, None] * (q - base)
@@ -167,7 +113,7 @@ def review_probabilities(df, calculate_scores, cache=None, review_draws=24):
         differences = losses - losses[:, best, None]
         uncertainty = differences.std(axis=0, ddof=1) / np.sqrt(len(losses))
         chosen = int(np.flatnonzero(mean_losses - mean_losses[best] <= uncertainty + 1e-12)[0])
-    q = calibrated_probabilities(df, calculate_scores, cache, methods=methods)
+    q = calibrated_probabilities(df, calculate_scores, cache)
     report = {
         "version": VERSION, "history_sha256": history_fingerprint(df),
         "target_draw": int(df.iloc[-1]["회차"]) + 1,
@@ -176,14 +122,12 @@ def review_probabilities(df, calculate_scores, cache=None, review_draws=24):
         "mean_brier_losses": None if mean_losses is None else mean_losses.tolist(),
         "last_draw_brier_losses": None if not len(losses) else np.asarray(losses)[-1].tolist(),
         "reason": "paired_one_standard_error" if len(losses) >= 12 else "insufficient_history",
-        "method_screening": method_report,
-        "effective_methods": methods if strengths[chosen] else [],
         "limits": "Retrospective tuning, not held-out proof of improvement or winning probabilities.",
     }
     return base + strengths[chosen] * (q - base), report
 
 
-def select_ranked_portfolio(probabilities, set_count=10, seed=0, candidate_count=1600, scenario_count=2400):
+def select_portfolio(probabilities, set_count=10, seed=0, candidate_count=1600, scenario_count=2400):
     """Exact top distinct six-number sets under a conditional Bernoulli model.
 
     Conditioning independent inclusions on exactly six numbers makes set mass
@@ -223,48 +167,6 @@ def select_ranked_portfolio(probabilities, set_count=10, seed=0, candidate_count
                 seen.add(neighbor)
                 heapq.heappush(heap, (-float(log_odds[list(neighbor)].sum()), neighbor))
     return pd.DataFrame(rows)[["세트"] + NUMBER_COLUMNS + ["조합점수"]]
-
-
-def select_portfolio(probabilities, set_count=10, seed=0, candidate_count=1600, scenario_count=2400):
-    """Balance number exposure first, then avoid repeated pairs, then rank q.
-
-    Ten tickets cover all 45 numbers with at most two uses of any number.
-    This controls batch concentration; it does not improve any ticket's fair
-    jackpot odds or guarantee a prize. Seeds only break equal-priority ties.
-    """
-    q = np.asarray(probabilities, dtype=float)
-    if (q.shape != (45,) or not np.isfinite(q).all()
-            or np.any(q <= 0) or np.any(q >= 1)):
-        raise ValueError("invalid probabilities")
-    if (isinstance(set_count, (bool, np.bool_)) or not isinstance(set_count, (int, np.integer))
-            or not 1 <= set_count <= min(10, candidate_count)):
-        raise ValueError("set_count must be between 1 and 10")
-    rng = np.random.default_rng(seed)
-    exposure = np.zeros(45, dtype=int)
-    pairs = np.zeros((45, 45), dtype=int)
-    rows = []
-    for set_id in range(1, set_count + 1):
-        chosen = []
-        for _ in range(6):
-            pair_cost = pairs[:, chosen].sum(axis=1)
-            order = np.lexsort((rng.random(45), -q, pair_cost, exposure))
-            number = next(int(n) for n in order if n not in chosen)
-            chosen.append(number)
-            exposure[number] += 1
-        numbers = np.sort(chosen)
-        pairs[np.ix_(numbers, numbers)] += 1
-        rows.append({"세트": set_id, "조합점수": round(float(q[numbers].sum()), 6),
-                     **dict(zip(NUMBER_COLUMNS, (numbers + 1).tolist()))})
-    return pd.DataFrame(rows)[["세트"] + NUMBER_COLUMNS + ["조합점수"]]
-
-
-def portfolio_diagnostics(tickets):
-    numbers = np.asarray(tickets, dtype=int)
-    counts = np.bincount(numbers.ravel(), minlength=46)[1:46]
-    overlaps = [len(set(a) & set(b)) for i, a in enumerate(numbers) for b in numbers[i + 1:]]
-    return {"unique_numbers": int(np.count_nonzero(counts)),
-            "max_number_exposure": int(counts.max()),
-            "max_pairwise_overlap": max(overlaps, default=0)}
 
 
 def select_simulated_portfolio(probabilities, set_count=10, seed=0, candidate_count=1600, scenario_count=2400):
@@ -321,8 +223,6 @@ def generate_prediction_sets(df, calculate_scores, set_count=10, target_draw=Non
     probabilities, report = review_probabilities(df, calculate_scores, cache)
     seed = int(random_seed) if random_seed is not None else target * 10007 + len(df)
     result = select_portfolio(probabilities, set_count=set_count, seed=seed)
-    report["selection_policy"] = "balanced_exposure_then_pair_reuse_then_probability"
-    report["portfolio_diagnostics"] = portfolio_diagnostics(result[NUMBER_COLUMNS].to_numpy())
     result.attrs["weekly_review"] = report
     return result
 
@@ -336,8 +236,7 @@ def summarize(records):
     best = [max(row["hits"]) for row in records]
     return {"draws": len(records), "mean_ticket_hits": float(np.mean([row["hits"] for row in records])),
             "mean_best_hits": float(np.mean(best)),
-            "zero_hit_draws": sum(h == 0 for h in best),
-            "draws_at_least": {str(n): sum(h >= n for h in best) for n in range(1, 7)}}
+            "draws_at_least": {str(n): sum(h >= n for h in best) for n in range(3, 7)}}
 
 
 def load_feature_cache(path):

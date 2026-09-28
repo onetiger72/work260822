@@ -1,0 +1,507 @@
+{
+  "mode": "audit_only_no_new_tickets",
+  "checked_at": "2026-09-28T03:09:27.311962+00:00",
+  "expected_completed_draw": 1243,
+  "available_completed_draw": 1242,
+  "official_status": "offline",
+  "unavailable_rounds": [],
+  "ready_for_generation": false,
+  "input_history_sha256": "3a1d2c3a1f493b01f43e5795ba732aa7242ffc99c68f00162c4c256389560d3a",
+  "input_predictions_sha256": "28400c40713f0c18dd9f1a8dcd14e071ee4d80cfe399155c3c7bbc286f3e0a30",
+  "comparisons": [
+    {
+      "draw": 1238,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 17,
+      "max_number_exposure": 10,
+      "max_pairwise_overlap": 4,
+      "high_number_count": 18,
+      "high_number_ratio": 0.3,
+      "actual": {
+        "회차": 1238,
+        "날짜": "20260822",
+        "번호1": 2,
+        "번호2": 13,
+        "번호3": 18,
+        "번호4": 32,
+        "번호5": 38,
+        "번호6": 42,
+        "보너스": 22
+      },
+      "main_hits": [
+        2,
+        2,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        1
+      ],
+      "bonus_hits": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "best_main_hits": 2,
+      "mean_main_hits": 1.4,
+      "zero_hit_sets": 0,
+      "stored_evaluation_mismatches": []
+    },
+    {
+      "draw": 1239,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 33,
+      "max_number_exposure": 4,
+      "max_pairwise_overlap": 2,
+      "high_number_count": 16,
+      "high_number_ratio": 0.2667,
+      "actual": {
+        "회차": 1239,
+        "날짜": "20260829",
+        "번호1": 11,
+        "번호2": 13,
+        "번호3": 22,
+        "번호4": 32,
+        "번호5": 33,
+        "번호6": 36,
+        "보너스": 8
+      },
+      "main_hits": [
+        1,
+        1,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      "bonus_hits": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+      ],
+      "best_main_hits": 2,
+      "mean_main_hits": 0.9,
+      "zero_hit_sets": 2,
+      "stored_evaluation_mismatches": []
+    },
+    {
+      "draw": 1240,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 39,
+      "max_number_exposure": 3,
+      "max_pairwise_overlap": 1,
+      "high_number_count": 16,
+      "high_number_ratio": 0.2667,
+      "actual": {
+        "회차": 1240,
+        "날짜": "20260905",
+        "번호1": 11,
+        "번호2": 13,
+        "번호3": 19,
+        "번호4": 20,
+        "번호5": 31,
+        "번호6": 44,
+        "보너스": 27
+      },
+      "main_hits": [
+        2,
+        0,
+        1,
+        0,
+        1,
+        2,
+        1,
+        0,
+        0,
+        2
+      ],
+      "bonus_hits": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0
+      ],
+      "best_main_hits": 2,
+      "mean_main_hits": 0.9,
+      "zero_hit_sets": 4,
+      "stored_evaluation_mismatches": []
+    },
+    {
+      "draw": 1241,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 40,
+      "max_number_exposure": 3,
+      "max_pairwise_overlap": 3,
+      "high_number_count": 18,
+      "high_number_ratio": 0.3,
+      "actual": {
+        "회차": 1241,
+        "날짜": "20260912",
+        "번호1": 7,
+        "번호2": 13,
+        "번호3": 16,
+        "번호4": 23,
+        "번호5": 24,
+        "번호6": 43,
+        "보너스": 9
+      },
+      "main_hits": [
+        2,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1
+      ],
+      "bonus_hits": [
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "best_main_hits": 2,
+      "mean_main_hits": 0.8,
+      "zero_hit_sets": 3,
+      "stored_evaluation_mismatches": []
+    },
+    {
+      "draw": 1242,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 9,
+      "max_number_exposure": 10,
+      "max_pairwise_overlap": 5,
+      "high_number_count": 18,
+      "high_number_ratio": 0.3,
+      "actual": {
+        "회차": 1242,
+        "날짜": "20260919",
+        "번호1": 2,
+        "번호2": 4,
+        "번호3": 10,
+        "번호4": 16,
+        "번호5": 31,
+        "번호6": 41,
+        "보너스": 9
+      },
+      "main_hits": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "bonus_hits": [
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1
+      ],
+      "best_main_hits": 0,
+      "mean_main_hits": 0.0,
+      "zero_hit_sets": 10,
+      "stored_evaluation_mismatches": []
+    },
+    {
+      "draw": 1243,
+      "sets": 10,
+      "set_ids": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "unique_numbers": 15,
+      "max_number_exposure": 10,
+      "max_pairwise_overlap": 5,
+      "high_number_count": 23,
+      "high_number_ratio": 0.3833,
+      "status": "result_unavailable"
+    }
+  ],
+  "logic_review": {
+    "version": "screened_balanced_v5",
+    "history_sha256": "3d5b3cdf854f5b52e30a0bc2feb66a5a06b5ce7d4f9855f5c3f1e7a496e05118",
+    "target_draw": 1243,
+    "review_rounds": [
+      1219,
+      1220,
+      1221,
+      1222,
+      1223,
+      1224,
+      1225,
+      1226,
+      1227,
+      1228,
+      1229,
+      1230,
+      1231,
+      1232,
+      1233,
+      1234,
+      1235,
+      1236,
+      1237,
+      1238,
+      1239,
+      1240,
+      1241,
+      1242
+    ],
+    "selected_strength": 0.0,
+    "candidate_strengths": [
+      0.0,
+      0.25,
+      0.5,
+      1.0
+    ],
+    "mean_brier_losses": [
+      0.11555555555555554,
+      0.11555555555555554,
+      0.11555555555555554,
+      0.11555555555555554
+    ],
+    "last_draw_brier_losses": [
+      0.11555555555555558,
+      0.11555555555555558,
+      0.11555555555555558,
+      0.11555555555555558
+    ],
+    "reason": "paired_one_standard_error",
+    "method_screening": {
+      "rounds": [
+        1195,
+        1196,
+        1197,
+        1198,
+        1199,
+        1200,
+        1201,
+        1202,
+        1203,
+        1204,
+        1205,
+        1206,
+        1207,
+        1208,
+        1209,
+        1210,
+        1211,
+        1212,
+        1213,
+        1214,
+        1215,
+        1216,
+        1217,
+        1218
+      ],
+      "selected_methods": [],
+      "methods": [
+        {
+          "method": "끝수다이내믹스",
+          "enabled": false,
+          "mean_brier_gain": -1.7719745257968138e-06,
+          "paired_standard_error": 4.902153781305664e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "동반출현연결",
+          "enabled": false,
+          "mean_brier_gain": -2.747985947869289e-05,
+          "paired_standard_error": 4.012524028102375e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "마코프전이",
+          "enabled": false,
+          "mean_brier_gain": -7.436973952138978e-06,
+          "paired_standard_error": 7.3476094975223176e-06,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "전체빈도",
+          "enabled": false,
+          "mean_brier_gain": -7.447054596722523e-06,
+          "paired_standard_error": 2.0750456581986645e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "지수가중빈도",
+          "enabled": false,
+          "mean_brier_gain": 2.9805538242523113e-06,
+          "paired_standard_error": 1.790432377037142e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "직전회차전이",
+          "enabled": false,
+          "mean_brier_gain": -4.5203218133269e-06,
+          "paired_standard_error": 5.617379998722792e-06,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "최근100회빈도",
+          "enabled": false,
+          "mean_brier_gain": 2.0549706933485623e-05,
+          "paired_standard_error": 2.735639232639601e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "최근2회문맥",
+          "enabled": false,
+          "mean_brier_gain": -1.4590019323703028e-06,
+          "paired_standard_error": 1.9843737891392587e-06,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "최근30회빈도",
+          "enabled": false,
+          "mean_brier_gain": 5.133072270062378e-06,
+          "paired_standard_error": 2.5210694401904234e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "최근추세",
+          "enabled": false,
+          "mean_brier_gain": 3.335228192451016e-05,
+          "paired_standard_error": 3.0941956862910975e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "출현간격주기",
+          "enabled": false,
+          "mean_brier_gain": 8.203552039600462e-05,
+          "paired_standard_error": 8.144432385824224e-05,
+          "reason": "no_reliable_gain"
+        },
+        {
+          "method": "핫콜드밸런스",
+          "enabled": false,
+          "mean_brier_gain": -2.9756142864688826e-06,
+          "paired_standard_error": 1.676394933008548e-05,
+          "reason": "no_reliable_gain"
+        }
+      ],
+      "excluded_by_policy": [
+        "보너스보조신호"
+      ]
+    },
+    "effective_methods": [],
+    "limits": "Retrospective tuning, not held-out proof of improvement or winning probabilities."
+  },
+  "limits": "CSV files are unchanged. Historical replay is not proof of pre-draw predictions or future superiority."
+}
