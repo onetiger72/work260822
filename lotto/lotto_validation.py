@@ -1,4 +1,9 @@
-"""Strict data checks and a separate GPT review of the exact candidate batch."""
+"""정수·회차·날짜 검증과, 정확히 같은 후보 묶음에 대한 별도 GPT 검토.
+
+데이터 유효성과 미래 적중은 별개다. 검토 응답은 입력 해시·대상 회차·전체 세트
+ID에 묶고, 공식 결과가 확인되지 않으면 pass 응답도 최종 확정으로 처리하지 않는다.
+이 모듈은 중간 파일을 읽거나 쓰지 않는다.
+"""
 import hashlib
 import json
 import os
@@ -9,6 +14,11 @@ NUMBERS = [f"번호{i}" for i in range(1, 7)]
 
 
 def strict_int(value):
+    """정수로 표현 가능한 유한 값만 허용한다. int(1.9) 같은 절삭을 금지한다.
+
+    CSV의 '1'과 정수값 1.0은 허용하지만 불리언·소수·NaN·무한대는 거부한다.
+    값 검증 전에 astype(int)를 쓰면 원래 오류를 발견할 수 없으므로 순서를 지킨다.
+    """
     if isinstance(value, bool):
         raise ValueError("boolean is not a lottery number")
     try:
@@ -21,6 +31,7 @@ def strict_int(value):
 
 
 def validate_draw(row):
+    """회차별 날짜와 본번호/보너스를 확인하고 비교에 쓸 핵심 필드만 정규화한다."""
     draw = strict_int(row["회차"])
     numbers = [strict_int(row[c]) for c in NUMBERS]
     bonus = strict_int(row["보너스"])
@@ -36,6 +47,7 @@ def validate_draw(row):
 
 
 def validate_history(df):
+    """정렬되지 않은 입력은 허용하되 1회부터의 누락·중복은 보정 없이 거부한다."""
     rows = [validate_draw(row) for row in df.to_dict("records")]
     rounds = sorted(row["회차"] for row in rows)
     if not rounds or rounds != list(range(1, rounds[-1] + 1)):
@@ -44,6 +56,7 @@ def validate_history(df):
 
 
 def build_payload(history, candidates, predictions, fetch_draw, expected_count=10):
+    """후보 전부와 직전 회차 재채점·공식 대조를 한 검토 입력으로 묶는다."""
     rows = validate_history(history)
     latest = rows[-1]
     target = latest["회차"] + 1
@@ -96,6 +109,7 @@ def review_schema():
 
 
 def validate_review(review, payload, fingerprint):
+    """다른 입력/회차의 응답이나 일부 세트만 확인한 응답을 재사용하지 못하게 한다."""
     if not isinstance(review, dict) or set(review) != set(review_schema()["properties"]):
         raise ValueError("invalid review fields")
     ids = review["checked_set_ids"]
@@ -111,7 +125,11 @@ def validate_review(review, payload, fingerprint):
 
 def final_review(history, candidates, predictions, fetch_draw, client=None, expected_count=10,
                  manual_review=None):
-    """Return the review and manual request in memory; never read/write files."""
+    """검토 요청·응답·상태를 메모리로 반환한다. 수동 대기와 최종 확정을 구분한다.
+
+    예외는 validation_error로 반환하며 저장 호출자는 이 상태에서 중단해야 한다.
+    finalized는 공식 대조와 유효한 pass가 함께 있을 때만 참이다.
+    """
     result = {"status": "pending", "finalized": False,
               "checked_at": datetime.now(timezone.utc).isoformat()}
     try:

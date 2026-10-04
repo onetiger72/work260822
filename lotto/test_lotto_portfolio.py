@@ -136,6 +136,34 @@ class TicketTests(unittest.TestCase):
                 self.assertEqual(diagnostics["max_number_exposure"], 2)
                 self.assertLessEqual(diagnostics["max_pairwise_overlap"], 2)
 
+    def test_probability_magnitude_changes_selection_without_changing_rank(self):
+        # 순위만 사용하는 구현은 양의 수축 강도에서 항상 같은 번호를 만들었다.
+        # 동일 seed로 난수를 고정해, 확률의 크기가 선택에 들어가는지 검증한다.
+        base = np.full(45, 6 / 45)
+        q = base + np.linspace(-0.05, 0.05, 45)
+        batches = [portfolio.select_portfolio(base + s * (q - base), seed=42)
+                   for s in [0.25, 0.5, 1.0]]
+        numbers = [b[portfolio.NUMBER_COLUMNS].to_numpy() for b in batches]
+        self.assertFalse(all(np.array_equal(numbers[0], b) for b in numbers[1:]))
+        for batch in numbers:
+            self.assertEqual(portfolio.portfolio_diagnostics(batch)["unique_numbers"], 45)
+            self.assertEqual(portfolio.portfolio_diagnostics(batch)["max_number_exposure"], 2)
+
+    def test_weighted_selection_favors_high_q_without_removing_seed_reproducibility(self):
+        # 한 시드의 우연한 성공이 아니라, 고정된 다수 시드의 첫 슬롯에서 확인한다.
+        # 이 테스트는 실제 로또 예측력이 아니라 가중 추출 동작만 검증한다.
+        q = np.r_[np.full(6, 0.30), np.full(39, (6 - 6 * 0.30) / 39)]
+        weighted, uniform = 0, 0
+        for seed in range(150):
+            for probabilities, kind in [(q, "weighted"), (np.full(45, 6 / 45), "uniform")]:
+                ticket = portfolio.select_portfolio(probabilities, set_count=1, seed=seed)
+                hits = int((ticket[portfolio.NUMBER_COLUMNS].to_numpy() <= 6).sum())
+                if kind == "weighted":
+                    weighted += hits
+                else:
+                    uniform += hits
+        self.assertGreater(weighted, uniform)
+
     def test_invalid_probabilities_and_ticket_count_are_rejected(self):
         for probabilities in [np.ones(44) / 7, np.full(45, np.nan), np.zeros(45), np.ones(45)]:
             with self.subTest(probabilities=probabilities), self.assertRaises(ValueError):

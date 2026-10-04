@@ -1,10 +1,19 @@
-# 로또 결과 수집·기법 검증·번호 생성. 영구 저장은 당첨 이력과 예상번호 CSV 두 개만 사용합니다.
+"""로또 결과 수집 → 저장 예측 재평가 → 기법 검증 → 다음 회차 후보 생성.
+
+입력 검증은 lotto_storage, 시간 순서 학습과 선택은 lotto_portfolio,
+공식 결과 대조는 lotto_weekly, 후보 최종 검토는 lotto_validation이 담당한다.
+오류가 있는 CSV는 빈 이력으로 복구하지 않고 중단한다. 수집한 결과는 모든
+대상 회차 검증 후 저장하며, 기존 예측번호를 사후 결과에 맞춰 바꾸지 않는다.
+영구 데이터는 당첨 이력과 예상번호 CSV 두 개뿐이다. --audit-only 경로는
+파일을 변경하지 않는다. 통계 점수와 분산 선택은 당첨을 보장하지 않는다.
+"""
 
 import os
 
 import json
 
-from lotto_validation import strict_int, validate_history, final_review, print_review
+from lotto_validation import strict_int, validate_draw, validate_history, final_review, print_review
+from lotto_storage import load_history, load_predictions, validate_prediction_history
 
 from lotto_weekly import latest_completed_draw, verify_latest_result
 
@@ -259,275 +268,58 @@ def get_lotto_draw(draw_no, max_retries=3, retry_delay=1.0):
         return None
 
 def load_history_csv():
+    """검증된 이력을 읽는다. 파일 부재만 빈 이력이고 손상/읽기 오류는 중단한다.
+
+    오류를 잡아 빈 DataFrame으로 반환하면 수집기가 기존 파일을 새 이력으로
+    덮어쓸 수 있다. 검증 실패는 그대로 전달하여 사용자 원본을 보존한다.
     """
-    기존 당첨 이력 CSV를 읽고 필수 열, 번호 범위,
-    본 번호 중복, 보너스 번호 및 회차 중복을 검증합니다.
+    return load_history(CSV_FILE, missing_ok=True)
+
+
+def collect_all_lotto(query_round, start_draw=1, sleep_time=0.10):
+    """누락 회차를 메모리에 모아 전체 검증이 끝났을 때만 당첨 CSV를 저장한다.
+
+    처리 순서: 기존 원본 검증 → 수집 범위 결정 → 모든 요청 성공 확인 →
+    요청/응답 회차·번호·날짜 검증 → 결합 이력 검증 → 한 번 저장.
+    하나라도 실패하면 기존 파일과 이전 유효 행을 그대로 둔다. 일부 성공한
+    응답으로 원본을 대체하거나, 중복을 임의로 삭제하는 복구는 하지 않는다.
     """
-
-    if not os.path.exists(CSV_FILE):
-        return pd.DataFrame()
-
-    try:
-        df = pd.read_csv(
-            CSV_FILE,
-            encoding="utf-8-sig"
-        )
-
-        if df.empty or "회차" not in df.columns:
-            return pd.DataFrame()
-
-        required_columns = ["회차"] + NUMBER_COLUMNS + ["보너스"]
-        missing_columns = [
-            column
-            for column in required_columns
-            if column not in df.columns
-        ]
-
-        if missing_columns:
-            print(
-                "[CSV 형식 오류] 필수 열 누락 : "
-                + ", ".join(missing_columns)
-            )
-            return pd.DataFrame()
-
-        # Validate raw values before numeric coercion can truncate fractions or
-        # silently discard conflicting/missing historical draws.
-        validate_history(df)
-
-        for column in required_columns:
-            df[column] = pd.to_numeric(
-                df[column],
-                errors="coerce"
-            )
-
-        df = df.dropna(
-            subset=required_columns
-        )
-
-        for column in required_columns:
-            df[column] = df[column].astype(int)
-
-        valid_number_range = df[NUMBER_COLUMNS].apply(
-            lambda column: column.between(1, 45)
-        ).all(axis=1)
-        unique_main_numbers = (
-            df[NUMBER_COLUMNS].nunique(axis=1) == 6
-        )
-        valid_bonus = df["보너스"].between(1, 45)
-        bonus_not_in_main = ~df.apply(
-            lambda row: int(row["보너스"]) in {
-                int(row[column])
-                for column in NUMBER_COLUMNS
-            },
-            axis=1
-        )
-        valid_rows = (
-            valid_number_range
-            & unique_main_numbers
-            & valid_bonus
-            & bonus_not_in_main
-            & (df["회차"] >= 1)
-        )
-        invalid_count = int((~valid_rows).sum())
-
-        if invalid_count:
-            print(f"[CSV 검증] 잘못된 당첨 데이터 {invalid_count}행을 제외합니다.")
-
-        df = df[valid_rows].copy()
-        duplicate_count = int(df["회차"].duplicated(keep="last").sum())
-
-        if duplicate_count:
-            print(f"[CSV 검증] 중복 회차 {duplicate_count}행을 제외합니다.")
-
-        df = (
-            df
-            .drop_duplicates(subset=["회차"], keep="last")
-            .sort_values("회차")
-            .reset_index(drop=True)
-        )
-
-        return df
-
-    except Exception as e:
-        print(f"[CSV 로드 오류] {e}")
-        return pd.DataFrame()
-
-def collect_all_lotto(
-        query_round,
-        start_draw=1,
-        sleep_time=0.10
-):
-    """
-    사용자가 조회한 회차(query_round)까지 기존 CSV와 비교하여
-    마지막 회차 이후의 신규 데이터와 중간 누락 회차를 수집합니다.
-
-    예)
-    CSV 마지막 회차 = 1180
-    조회 회차 = 1184
-    -> 1181, 1182, 1183, 1184를 추가
-
-    임의의 최대 회차 상한값은 사용하지 않습니다.
-    """
-
-    print()
-    print("=" * 70)
-    print("조회 회차와 CSV 마지막 회차 비교")
-    print("=" * 70)
-
-    # --------------------------------------------------------
-    # 1. 조회 회차 및 기존 CSV 확인
-    # --------------------------------------------------------
-    query_round = int(query_round)
-    existing_df = load_history_csv()
-
+    query_round, start_draw = strict_int(query_round), strict_int(start_draw)
+    if start_draw < 1:
+        raise ValueError("수집 시작 회차는 1 이상이어야 합니다.")
+    existing = load_history_csv()  # 손상된 파일이면 네트워크 조회 전에 예외 발생
     if query_round <= 0:
-        print("QUERY_ROUND가 0이므로 홈페이지의 다음 회차를 자동 확인합니다.")
-        print(f"기존 CSV 사용 : {CSV_FILE}")
+        query_round = latest_completed_draw()
+    existing_rounds = set(existing["회차"]) if not existing.empty else set()
+    targets = [n for n in range(start_draw, query_round + 1) if n not in existing_rounds]
+    if not targets:
+        print(f"{query_round}회까지 수집할 누락 회차가 없습니다.")
+        return existing
 
-        # 0을 '네트워크 완전 생략'으로 처리하면 CSV가 1237회에 머문 뒤
-        # 홈페이지에 이미 발표된 1238회를 놓칠 수 있습니다. 현재 CSV의
-        # 마지막 회차 다음 회차만 먼저 조회하여 누락분만 보충합니다.
-        if not existing_df.empty:
-            latest_existing_round = int(existing_df["회차"].max())
-            next_round = latest_existing_round + 1
-            next_result = get_lotto_draw(next_round)
-            if next_result is not None:
-                print(f"홈페이지에서 {next_round}회 데이터를 확인했습니다.")
-                query_round = next_round
-            else:
-                print("CSV 이후 발표된 새 회차가 없어 기존 CSV를 사용합니다.")
-                return existing_df
-        else:
-            print("기존 CSV가 비어 있어 자동 수집을 진행할 수 없습니다.")
-            return existing_df
-
-    # --------------------------------------------------------
-    # 2. 기존 CSV 로드 및 마지막 회차 확인
-    # --------------------------------------------------------
-    if existing_df.empty:
-        csv_last_round = 0
-        print(f"기존 CSV 없음 : {CSV_FILE}")
-    else:
-        csv_last_round = int(existing_df["회차"].max())
-        print(f"CSV 마지막 회차 : {csv_last_round}회")
-
-    print(f"조회 회차          : {query_round}회")
-
-    # --------------------------------------------------------
-    # 3. 조회 범위에서 신규 및 중간 누락 회차 확인
-    # --------------------------------------------------------
-    existing_rounds = (
-        set(existing_df["회차"].astype(int))
-        if not existing_df.empty
-        else set()
-    )
-    target_rounds = [
-        draw_no
-        for draw_no in range(start_draw, query_round + 1)
-        if draw_no not in existing_rounds
-    ]
-
-    if not target_rounds:
-        print()
-        print(f"1회부터 {query_round}회까지 누락된 데이터가 없습니다.")
-        return existing_df
-
-    # --------------------------------------------------------
-    # 4. 수집 대상 출력
-    # --------------------------------------------------------
-    print()
-    target_text = ", ".join(str(draw_no) for draw_no in target_rounds)
-
-    if len(target_rounds) > 20:
-        target_text = (
-            ", ".join(str(draw_no) for draw_no in target_rounds[:10])
-            + " ... "
-            + ", ".join(str(draw_no) for draw_no in target_rounds[-5:])
-        )
-
-    print(f"수집 대상 회차 : {target_text}")
-    print(
-        f"수집 대상 건수 : "
-        f"{len(target_rounds)}개"
-    )
-
-    # --------------------------------------------------------
-    # 5. 차이 나는 회차만 조회
-    # --------------------------------------------------------
-    new_data = []
-
-    for index, draw_no in enumerate(
-        target_rounds,
-        start=1
-    ):
-
-        result = get_lotto_draw(draw_no)
-
-        if result is not None:
-            new_data.append(result)
-
-            print(
-                f"[{index}/{len(target_rounds)}] "
-                f"{draw_no}회 추가 완료"
-            )
-
-        else:
-            print(
-                f"[{index}/{len(target_rounds)}] "
-                f"{draw_no}회 조회 실패"
-            )
-
+    new_rows = []
+    for position, target in enumerate(targets, 1):
+        result = get_lotto_draw(target)
+        if result is None:
+            raise ValueError(f"{target}회 조회 실패: 당첨 이력 CSV를 변경하지 않았습니다.")
+        normalized = validate_draw(result)
+        if normalized["회차"] != target:
+            raise ValueError(f"요청 {target}회와 공식 응답 회차가 다릅니다. 저장을 중단합니다.")
+        # 공식 부가 정보는 유지하되 회차·본번호·보너스·날짜는 검증한 값만 사용한다.
+        new_rows.append({**result, **normalized})
+        print(f"[{position}/{len(targets)}] {target}회 검증 완료 (아직 저장하지 않음)")
         time.sleep(sleep_time)
 
-    if not new_data:
-        print("추가할 당첨번호 데이터를 가져오지 못했습니다.")
-        return existing_df
+    incoming = pd.DataFrame(new_rows)
+    combined = incoming if existing.empty else pd.concat([existing, incoming], ignore_index=True)
+    combined = combined.sort_values("회차").reset_index(drop=True)
+    validate_history(combined)  # 누락·중복을 감춘 채 덮어쓰지 않는 최종 저장 경계
+    combined.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+    print(f"당첨 이력 저장 완료: {len(new_rows)}개 추가, 총 {len(combined)}회")
+    return combined
 
-    # --------------------------------------------------------
-    # 6. 기존 데이터 뒤에 신규 회차 추가
-    # --------------------------------------------------------
-    new_df = pd.DataFrame(new_data)
-
-    if existing_df.empty:
-        combined_df = new_df
-
-    else:
-        combined_df = pd.concat(
-            [
-                existing_df,
-                new_df
-            ],
-            ignore_index=True
-        )
-
-    combined_df = (
-        combined_df
-        .drop_duplicates(subset=["회차"], keep="last")
-        .sort_values("회차")
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # 7. CSV 저장
-    # --------------------------------------------------------
-    combined_df.to_csv(
-        CSV_FILE,
-        index=False,
-        encoding="utf-8-sig"
-    )
-
-    print()
-    print("=" * 70)
-    print(f"CSV 업데이트 완료 : {CSV_FILE}")
-    print(f"기존 마지막 회차   : {csv_last_round}회")
-    print(f"조회 회차          : {query_round}회")
-    print(f"누락/신규 추가 수  : {len(new_df)}개")
-    print(f"현재 마지막 회차   : {int(combined_df['회차'].max())}회")
-    print("=" * 70)
-
-    return combined_df
 
 def create_features(df):
+    """출력·통계용 파생 열을 복사본에 추가한다. 저장 이력 자체는 바꾸지 않는다."""
 
     # 호출자가 가진 원본 당첨 이력을 변경하지 않습니다.
     df = df.copy()
@@ -889,7 +681,7 @@ def _get_draw_sets(df):
     ]
 
 def _normalize_score_map(raw_scores):
-    """번호별 임의 점수를 0.05~1.00 범위로 정규화합니다."""
+    """번호별 특징을 0.05~1.00으로 맞춘다. 정규화된 점수는 당첨 확률이 아니다."""
 
     cleaned = {}
 
@@ -1367,7 +1159,11 @@ ANALYSIS_METHOD_PRIORS = {
 }
 
 def calculate_analysis_scores(df):
-    """활성화된 모든 분석기법의 번호별 점수를 계산합니다."""
+    """전달된 과거 접두 이력으로만 번호별 원시 특징을 계산한다.
+
+    모든 등록 기법을 계산하더라도 실제 학습에 모두 쓰는 것은 아니다.
+    lotto_portfolio의 별도 선별·강도 검증을 통과한 특징만 최종 반영된다.
+    """
 
     return {
         method_name: method_function(df)
@@ -1384,6 +1180,8 @@ def backtest_analysis_methods(
     전체 검증 성능에 완료된 최근 2회 성능을 소폭 더 반영합니다.
     최근 표본은 18회 사전표본으로 수축하고, 기준 성능 1.0 이하인 기법에는
     탐색 가중치만 남겨 약한 신호가 유효한 신호를 희석하지 않게 합니다.
+    이 함수는 구형 기법 비교용입니다. 반환 가중치는 현재 v6 생성기에 적용하지
+    않으며, 현재의 실제 유지/제외 판단은 lotto_portfolio.screen_methods입니다.
     """
 
     method_names = list(ANALYSIS_METHODS)
@@ -1590,11 +1388,12 @@ def backtest_analysis_methods(
 
 def calculate_prediction_feedback(prediction_df):
     """
-    실제로 발행한 10세트의 번호별 노출확률과 당첨 여부를 비교합니다.
+    저장 예측의 번호별 노출 비율과 실제 본번호 포함 여부를 요약합니다.
 
-    Brier skill은 균등 포함확률(6/45)보다 나았는지를 측정합니다. 평가 회차가
-    적을 때는 38회 사전표본으로 강하게 수축해 우연한 1~2회 결과가 다음
-    예측을 크게 흔들지 않게 합니다.
+    노출 비율은 보정 모델의 q와 다릅니다. 여기의 Brier skill은 저장 조합의
+    진단값이며 모델 확률의 독립 성능이나 추첨 전 발행 사실을 입증하지 않습니다.
+    38회 사전표본 수축으로 계산하는 두 보강 계수는 구형 호환용 반환값입니다.
+    현재 v6 생성기는 이 계수를 사용하지 않으며 화면에는 적중 요약만 제공합니다.
     """
 
     empty_summary = {
@@ -1788,272 +1587,32 @@ def _lotto_prize_name(main_hit_count, bonus_hit):
 
     return "낙첨"
 
-def _empty_prediction_file_history():
-    return pd.DataFrame(columns=PREDICTION_FILE_COLUMNS)
 
-def _parse_actual_number_text(value):
-    if pd.isna(value):
-        return []
 
-    text = str(value).strip()
 
-    if not text:
-        return []
 
-    for character in "[]()":
-        text = text.replace(character, " ")
 
-    numbers = []
 
-    for token in text.replace(",", " ").split():
-        try:
-            number = int(float(token))
-        except ValueError:
-            continue
+def load_prediction_history(latest_history_round=None, filename=PREDICTION_FILE):
+    """회차와 번호를 추측하지 않고 기존 예측을 엄격하게 읽는다.
 
-        if 1 <= number <= 45:
-            numbers.append(number)
-
-    return sorted(dict.fromkeys(numbers))[:6]
-
-def _bonus_hit_to_integer(value):
-    if pd.isna(value):
-        return pd.NA
-
-    normalized = str(value).strip().lower()
-
-    if normalized in {"y", "yes", "true", "1", "1.0"}:
-        return 1
-    if normalized in {"n", "no", "false", "0", "0.0"}:
-        return 0
-
-    return pd.NA
-
-def load_prediction_history(
-        latest_history_round,
-        filename=PREDICTION_FILE
-):
+    latest_history_round는 이전 호출과의 호환용 인수다. 이 값으로 누락된
+    예측회차를 채우지 않는다. 세트/회차/본번호 오류, 중복, 파일 파싱 실패는
+    원본을 보존한 채 중단한다. 없는 파일만 새 예측을 위한 빈 표로 반환한다.
     """
-    현재 당첨예상번호.csv의 기존 예측을 읽어 고정 폼으로 유지합니다.
-    이전 실행에서 확장된 열이 있더라도 기존 폼으로 안전하게 되돌립니다.
-    """
+    return load_predictions(filename, missing_ok=True)
 
-    if not os.path.exists(filename):
-        return _empty_prediction_file_history()
-
-    try:
-        source_df = pd.read_csv(
-            filename,
-            encoding="utf-8-sig"
-        )
-    except Exception as error:
-        print(f"[예측 이력 로드 오류] {error}")
-        return _empty_prediction_file_history()
-
-    if source_df.empty:
-        return _empty_prediction_file_history()
-
-    result_df = pd.DataFrame(index=source_df.index)
-
-    if "세트" in source_df.columns:
-        result_df["세트"] = source_df["세트"]
-    else:
-        result_df["세트"] = range(1, len(source_df) + 1)
-
-    for column in NUMBER_COLUMNS:
-        result_df[column] = (
-            source_df[column]
-            if column in source_df.columns
-            else pd.NA
-        )
-
-    if "예측회차" in source_df.columns:
-        result_df["예측회차"] = source_df["예측회차"]
-    elif "예측대상회차" in source_df.columns:
-        result_df["예측회차"] = source_df["예측대상회차"]
-    else:
-        result_df["예측회차"] = int(latest_history_round) + 1
-
-    if "종합점수" in source_df.columns:
-        combined_score = pd.to_numeric(
-            source_df["종합점수"],
-            errors="coerce"
-        )
-    elif "조합점수" in source_df.columns:
-        combined_score = pd.to_numeric(
-            source_df["조합점수"],
-            errors="coerce"
-        )
-
-        if combined_score.notna().any() and combined_score.max() > 1.5:
-            combined_score = combined_score / 100
-    else:
-        combined_score = pd.Series(
-            pd.NA,
-            index=source_df.index,
-            dtype="Float64"
-        )
-
-    result_df["종합점수"] = combined_score
-
-    parsed_actual_numbers = (
-        source_df["실제당첨번호"].map(_parse_actual_number_text)
-        if "실제당첨번호" in source_df.columns
-        else pd.Series(
-            [[] for _ in range(len(source_df))],
-            index=source_df.index
-        )
-    )
-
-    actual_number_columns = [
-        f"실제번호{index}"
-        for index in range(1, 7)
-    ]
-
-    for position, column in enumerate(actual_number_columns):
-        if column in source_df.columns:
-            direct_values = pd.to_numeric(
-                source_df[column],
-                errors="coerce"
-            )
-        else:
-            direct_values = pd.Series(
-                pd.NA,
-                index=source_df.index,
-                dtype="Float64"
-            )
-
-        fallback_values = pd.Series(
-            [
-                numbers[position]
-                if len(numbers) > position
-                else pd.NA
-                for numbers in parsed_actual_numbers
-            ],
-            index=source_df.index,
-            dtype="Float64"
-        )
-        result_df[column] = direct_values.fillna(fallback_values)
-
-    if "본번호일치수" in source_df.columns:
-        main_hit_count = pd.to_numeric(
-            source_df["본번호일치수"],
-            errors="coerce"
-        )
-    elif "적중개수" in source_df.columns:
-        main_hit_count = pd.to_numeric(
-            source_df["적중개수"],
-            errors="coerce"
-        )
-    else:
-        main_hit_count = pd.Series(
-            pd.NA,
-            index=source_df.index,
-            dtype="Float64"
-        )
-
-    if "보너스일치" in source_df.columns:
-        bonus_hit = source_df["보너스일치"].map(
-            _bonus_hit_to_integer
-        )
-    elif "보너스적중" in source_df.columns:
-        bonus_hit = source_df["보너스적중"].map(
-            _bonus_hit_to_integer
-        )
-    else:
-        bonus_hit = pd.Series(
-            pd.NA,
-            index=source_df.index,
-            dtype="Int64"
-        )
-
-    main_hit_count = pd.to_numeric(
-        main_hit_count,
-        errors="coerce"
-    ).astype("Int64")
-    bonus_hit = pd.to_numeric(
-        bonus_hit,
-        errors="coerce"
-    ).astype("Int64")
-
-    if "총일치수" in source_df.columns:
-        total_hit_count = pd.to_numeric(
-            source_df["총일치수"],
-            errors="coerce"
-        )
-    else:
-        total_hit_count = pd.Series(
-            pd.NA,
-            index=source_df.index,
-            dtype="Float64"
-        )
-
-    evaluated_rows = main_hit_count.notna() | bonus_hit.notna()
-    calculated_total = (
-        main_hit_count.fillna(0) + bonus_hit.fillna(0)
-    )
-    total_hit_count = pd.to_numeric(
-        total_hit_count,
-        errors="coerce"
-    ).fillna(
-        calculated_total.where(evaluated_rows, pd.NA)
-    ).astype("Int64")
-
-    result_df["본번호일치수"] = main_hit_count
-    result_df["보너스일치"] = bonus_hit
-    result_df["총일치수"] = total_hit_count
-
-    required_numeric_columns = [
-        "세트",
-        "예측회차"
-    ] + NUMBER_COLUMNS
-
-    for column in required_numeric_columns:
-        result_df[column] = pd.to_numeric(
-            result_df[column],
-            errors="coerce"
-        )
-
-    result_df = result_df.dropna(
-        subset=required_numeric_columns
-    ).copy()
-
-    for column in required_numeric_columns:
-        result_df[column] = result_df[column].astype(int)
-
-    valid_predictions = (
-        result_df[NUMBER_COLUMNS]
-        .apply(lambda column: column.between(1, 45))
-        .all(axis=1)
-        & (result_df[NUMBER_COLUMNS].nunique(axis=1) == 6)
-    )
-    result_df = result_df[valid_predictions].copy()
-    result_df["종합점수"] = pd.to_numeric(
-        result_df["종합점수"],
-        errors="coerce"
-    ).round(6)
-
-    for column in actual_number_columns:
-        result_df[column] = pd.to_numeric(
-            result_df[column],
-            errors="coerce"
-        ).astype("Int64")
-
-    result_df = result_df.drop_duplicates(
-        subset=["예측회차", "세트"],
-        keep="first"
-    ).sort_values(
-        ["예측회차", "세트"]
-    ).reset_index(drop=True)
-
-    if list(source_df.columns) != PREDICTION_FILE_COLUMNS:
-        print("기존 예측 내용은 유지하고 당첨예상번호.csv 폼을 통일합니다.")
-
-    return result_df[PREDICTION_FILE_COLUMNS]
 
 def evaluate_prediction_history(prediction_df, history_df):
-    """새 당첨 회차가 있으면 기존 폼의 실제번호·일치수 열을 채웁니다."""
+    """기존 번호는 보존하고 실제번호·본번호 적중·보너스 적중을 다시 계산한다.
 
+    history_df는 호출자가 검증한 전체 이력이다. 이미 평가된 행도 다시 계산해
+    오래된 평가값을 고친다. 발표 전 회차는 그대로 두며 임의 정답을 채우지 않는다.
+    반환된 회차 집합은 이번에 처음 평가한 회차로, 화면 안내에만 사용한다.
+    """
+
+    # CSV에서 읽은 경우뿐 아니라 직접 전달한 표도 같은 기준으로 검증한다.
+    prediction_df = validate_prediction_history(prediction_df)
     if prediction_df.empty:
         return prediction_df, set()
 
@@ -2177,12 +1736,19 @@ def _print_new_evaluation_summary(
         )
 
 def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None):
-    """Evaluate existing tickets and save only the prediction CSV; reviews stay in memory."""
+    """입력·공식 결과 확인 후 기존 예측을 재평가하고 없는 다음 회차만 추가한다.
+
+    CSV를 읽을 수 없으면 새 이력으로 덮어쓰지 않는다. 다음 회차 후보가 이미
+    있으면 같은 번호로 재검토한다. 최종 검토의 거부/입력 오류는 저장을 막는다.
+    검토 대기 후보 저장은 기존 정책이며, 파일 존재를 최종 확정으로 해석하지
+    않는다. 검토 상태는 반환 DataFrame.attrs와 화면에만 남긴다.
+    """
     validate_history(df)
-    verify_latest_result(df, get_lotto_draw, expected_round=latest_completed_draw())
     latest_round = int(df["회차"].max())
     target_draw = latest_round + 1
+    # 파일 손상을 먼저 확인한다. 실패하면 생성·공식 재조회·저장을 진행하지 않는다.
     prediction_history = load_prediction_history(latest_history_round=latest_round, filename=filename)
+    verify_latest_result(df, get_lotto_draw, expected_round=latest_completed_draw())
     prediction_history, newly_evaluated_draws = evaluate_prediction_history(prediction_history, df)
     prediction_feedback, _ = calculate_prediction_feedback(prediction_history)
     current_prediction = prediction_history[prediction_history["예측회차"] == target_draw].copy()
@@ -2217,6 +1783,8 @@ def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None):
         print("아래 번호는 검증 대기 후보이며 GPT 최종 확정 번호가 아닙니다.")
 
     prediction_history = prediction_history.sort_values(["예측회차", "세트"]).reset_index(drop=True)
+    # 새 후보와 갱신된 과거 평가 전체를 다시 검사한 뒤 허용된 예상번호 CSV만 저장한다.
+    prediction_history = validate_prediction_history(prediction_history)
     prediction_history[PREDICTION_FILE_COLUMNS].to_csv(filename, index=False, encoding="utf-8-sig")
     _print_new_evaluation_summary(prediction_history, newly_evaluated_draws, df)
     print(f"{target_draw}회 당첨 예상번호 {len(current_prediction)}세트")
@@ -2338,6 +1906,7 @@ def print_summary(
     )
 
 def main():
+    """점검은 읽기 전용으로 분기하고, 일반 실행은 두 CSV 사전 검증부터 시작한다."""
 
     if "--audit-only" in sys.argv:
         from audit_predictions import audit
@@ -2363,6 +1932,9 @@ def main():
             )
             return
 
+    # 예측 CSV가 손상됐는데 당첨 CSV만 먼저 갱신하는 상황도 방지한다.
+    # 두 파일의 형식 문제는 수집/생성에 들어가기 전에 드러나야 한다.
+    load_prediction_history(filename=PREDICTION_FILE)
     df = collect_all_lotto(
         query_round=query_round,
         start_draw=1,

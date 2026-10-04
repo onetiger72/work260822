@@ -1,4 +1,8 @@
-"""Pre-generation audit: fetch results and review logic without writing tickets."""
+"""생성 전 읽기 전용 점검: 공식 조회·저장 예측 재채점·기법 검증을 화면에 출력한다.
+
+공식 조회로 받은 새 회차도 이번 실행의 메모리에만 추가한다. --offline은
+로컬 점검이며 공식 확인 성공을 뜻하지 않는다. 새 후보나 중간 파일은 저장하지 않는다.
+"""
 import argparse
 import hashlib
 import importlib.util
@@ -10,19 +14,19 @@ import pandas as pd
 
 from lotto_portfolio import NUMBER_COLUMNS, portfolio_diagnostics, review_probabilities, ticket_hits
 from lotto_validation import strict_int, validate_draw, validate_history
+from lotto_storage import load_history, load_predictions, validate_prediction_history
 from lotto_weekly import latest_completed_draw
 
 
 def compare_saved_predictions(history, predictions):
+    """원래 예측번호로 재채점해 저장 평가값과의 차이를 보고한다. 파일은 수정하지 않는다."""
     actuals = {row["회차"]: row for row in validate_history(history)}
     records = []
     if predictions.empty:
         return records
-    predictions = predictions.copy()
-    for column in ["예측회차", "세트"] + NUMBER_COLUMNS:
-        predictions[column] = predictions[column].map(strict_int)
-    if predictions.duplicated(["예측회차", "세트"]).any():
-        raise ValueError("duplicate prediction round/set")
+    # 일반 생성과 동일한 입력 검증을 사용한다. 점검에서 거부한 자료를
+    # 일반 실행에서는 정수 절삭·회차 추정으로 받아들이는 차이를 없앤다.
+    predictions = validate_prediction_history(predictions)
     for target, group in predictions.groupby("예측회차", sort=True):
         tickets = group[NUMBER_COLUMNS].to_numpy(dtype=int)
         if (int(target) < 1 or (group["세트"] < 1).any()
@@ -52,10 +56,10 @@ def compare_saved_predictions(history, predictions):
 
 
 def audit(app, offline=False):
+    """두 CSV 검증을 먼저 끝낸 후 조회한다. 일부 조회 실패는 보고 상태에 명시한다."""
     history_path, prediction_path = Path(app.CSV_FILE), Path(app.PREDICTION_FILE)
-    history = pd.read_csv(history_path, encoding="utf-8-sig")
-    validate_history(history)
-    history = history.sort_values("회차").reset_index(drop=True)
+    history = load_history(history_path)
+    predictions = load_predictions(prediction_path, missing_ok=True)
     expected = latest_completed_draw()
     official_status, unavailable = "offline", []
     if not offline:
@@ -77,8 +81,6 @@ def audit(app, offline=False):
             else:
                 history = pd.concat([history, pd.DataFrame([row])], ignore_index=True)
     validate_history(history)
-    predictions = (pd.read_csv(prediction_path, encoding="utf-8-sig") if prediction_path.exists()
-                   else pd.DataFrame())
     comparisons = compare_saved_predictions(history, predictions)
     print("Reviewing methods on chronological historical prefixes...", flush=True)
     _, review = review_probabilities(history, app.calculate_analysis_scores)

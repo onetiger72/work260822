@@ -14,8 +14,9 @@ from pathlib import Path
 import pandas as pd
 
 from lotto_portfolio import VERSION
-from lotto_validation import final_review, validate_history, print_review
+from lotto_validation import final_review, print_review
 from lotto_weekly import latest_completed_draw, verify_latest_result
+from lotto_storage import load_history, load_predictions
 
 
 def main():
@@ -29,13 +30,12 @@ def main():
     spec = importlib.util.spec_from_file_location("lotto_app", app_path)
     app = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(app)
-    history = pd.read_csv(app.CSV_FILE, encoding="utf-8-sig")
-    validate_history(history)
+    history = load_history(app.CSV_FILE)
+    predictions = load_predictions(app.PREDICTION_FILE)
     verify_latest_result(history, app.get_lotto_draw, latest_completed_draw())
     if args.target != int(history["회차"].max()) + 1:
         raise ValueError("only the next unobserved round may be regenerated")
     original_bytes = Path(app.PREDICTION_FILE).read_bytes()
-    predictions = pd.read_csv(app.PREDICTION_FILE, encoding="utf-8-sig")
     generated = app.generate_prediction_sets(history, target_draw=args.target)
     rows = []
     for row in generated.to_dict("records"):
