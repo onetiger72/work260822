@@ -38,6 +38,29 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(report["bonus_hits"], [1])
         self.assertEqual(report["stored_evaluation_mismatches"][0]["correct"], 5)
 
+    def test_saved_and_feedback_reports_distinguish_scattered_six_from_exact_six(self):
+        from benchmark_audit import load_module
+        history = dated_history(3)
+        actual = history.iloc[-1][[f"번호{i}" for i in range(1, 7)]].tolist()
+        outsiders = [n for n in range(1, 46) if n not in actual][:6]
+        tickets = [actual[:3] + outsiders[:3], actual[3:] + outsiders[3:]]
+        predictions = pd.DataFrame([
+            {"예측회차": 3, "세트": i + 1,
+             **{f"번호{j}": n for j, n in enumerate(ticket, 1)},
+             **{f"실제번호{j}": n for j, n in enumerate(actual, 1)}}
+            for i, ticket in enumerate(tickets)
+        ])
+        record = compare_saved_predictions(history, predictions)[0]
+        self.assertTrue(record["all_six_scattered"])
+        self.assertEqual(record["best_main_hits"], 3)
+        app = load_module("feedback_test_app", Path(__file__).resolve().parent / "로또 당첨번호 예측.py")
+        summary, details = app.calculate_prediction_feedback(predictions)
+        self.assertEqual(summary["all_six_scattered_draws"], 1)
+        self.assertEqual(summary["exact_six_draws"], 0)
+        self.assertEqual(summary["mean_best_main_hits"], 3)
+        self.assertEqual(details.iloc[0]["전체포함본번호수"], 6)
+        self.assertEqual(details.iloc[0]["분산손실"], 3)
+
     def test_audit_fetches_missing_draw_without_changing_csv_or_generating_tickets(self):
         history = dated_history(4)
         with tempfile.TemporaryDirectory() as directory:

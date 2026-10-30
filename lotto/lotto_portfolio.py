@@ -1,18 +1,19 @@
-"""추첨 이전 자료만 사용하는 본번호 보정·기법 선별·가중 분산 선택.
+"""추첨 이전 자료만 사용하는 본번호 보정·기법 선별·6개 조합 선택.
 
 원시 특징 → 앞 24회 기법 선별 → 뒤 24회 반영 강도 결정 → 다음 회차 보정 →
-노출/번호쌍 제약 안의 가중 추출 순서다. 학습 계수는 균등 6/45 쪽으로 줄인다.
-기법을 모두 제외하면 같은 선택기에 균등확률을 전달한다. 구형 순위/모의 선택기는
-비교용이며 기본 생성에서 호출하지 않는다. 계산과 보고서는 메모리에서만 유지한다.
+검증된 추정치로 완전한 6개 조합을 선택한다. 학습 계수는 균등 6/45 쪽으로 줄인다.
+균등 추정치에서는 모든 완전 조합의 질량이 같으므로 기존 분산 방식을 유지한다.
+계산과 보고서는 메모리에서만 유지한다.
 """
 import hashlib
 import heapq
+from math import comb
 
 import numpy as np
 import pandas as pd
 
 NUMBER_COLUMNS = [f"번호{i}" for i in range(1, 7)]
-VERSION = "screened_weighted_balanced_v6"
+VERSION = "screened_whole_ticket_v7"
 CALIBRATION_DRAWS = 120
 RIDGE = 120.0
 # Convex gain gives progressively greater value to approaching six main hits.
@@ -291,6 +292,69 @@ def portfolio_diagnostics(tickets):
             "max_pairwise_overlap": max(overlaps, default=0)}
 
 
+def select_whole_ticket_portfolio(probabilities, set_count=10, seed=0):
+    """6개 전체 일치의 모델 질량 합이 가장 큰 서로 다른 조합을 선택한다.
+
+    번호별 독립 포함을 정확히 6개로 조건화한 모델에서 조합 질량은 포함 오즈
+    여섯 개의 곱에 비례한다. 다른 조합의 전체 일치 사건은 배타적이므로 상위
+    set_count개 선택이 이 모델 안의 전체 일치 질량 합을 최대화한다. 실제
+    추첨에서의 우위를 입증하지 않으며, 평균/최고 부분 적중과는 다른 목적이다.
+    균등 추정치일 때에는 순위의 임의 동점 때문에 공통 5개를 고정하지 않는다.
+    """
+    q = np.asarray(probabilities, dtype=float)
+    if (q.shape != (45,) or not np.isfinite(q).all()
+            or np.any(q <= 0) or np.any(q >= 1)):
+        raise ValueError("invalid probabilities")
+    if (isinstance(set_count, (bool, np.bool_)) or not isinstance(set_count, (int, np.integer))
+            or not 1 <= set_count <= 10):
+        raise ValueError("set_count must be between 1 and 10")
+    uniform = float(np.ptp(q)) <= 1e-12
+    if uniform:
+        result = select_portfolio(q, set_count=set_count, seed=seed)
+    else:
+        # 구형 계산 기준은 수정하지 않고 정확한 상위 조합 탐색을 재사용한다.
+        # 번호 노출/번호쌍 제약으로 상위 조합을 강제로 분해하지 않는다.
+        result = select_ranked_portfolio(q, set_count=set_count, seed=seed)
+
+    # 45 choose 6 조합을 열거하지 않고 6차 기본 대칭합을 로그 공간에서 계산.
+    log_odds = np.log(q) - np.log1p(-q)
+    normalizer = np.full(7, -np.inf)
+    normalizer[0] = 0.0
+    for value in log_odds:
+        for size in range(6, 0, -1):
+            normalizer[size] = np.logaddexp(normalizer[size], normalizer[size - 1] + value)
+    tickets = result[NUMBER_COLUMNS].to_numpy(dtype=int) - 1
+    masses = np.exp(log_odds[tickets].sum(axis=1) - normalizer[6])
+    result.attrs["combination_selection"] = {
+        "objective": "maximize_model_exact_six_mass",
+        "policy": "balanced_uniform_tie" if uniform else "top_distinct_whole_tickets",
+        "model": "independent_inclusions_conditioned_on_exactly_six",
+        "per_ticket_model_mass": masses.tolist(),
+        "portfolio_model_exact_six_mass": float(masses.sum()),
+        "uniform_exact_six_probability": set_count / comb(45, 6),
+        "limits": "Model assumption, not proven real winning probabilities. Concentration can reduce partial-hit coverage.",
+    }
+    return result
+
+
+def combination_hit_diagnostics(tickets, actual):
+    """전체 포함과 한 세트 적중을 구분한다. 검증된 본번호 6개만 전달한다."""
+    rows = [set(int(n) for n in row) for row in tickets]
+    actual = set(int(n) for n in actual)
+    hits = [len(row & actual) for row in rows]
+    union_hits = len(set().union(*rows) & actual)
+    best = max(hits, default=0)
+    return {
+        "union_main_hits": union_hits,
+        "best_main_hits": best,
+        "fragmentation_gap": union_hits - best,
+        "all_six_in_union": union_hits == 6,
+        "all_six_scattered": union_hits == 6 and best < 6,
+        "exact_six_sets": hits.count(6),
+        "sets_at_least": {str(n): sum(h >= n for h in hits) for n in range(3, 7)},
+    }
+
+
 def select_simulated_portfolio(probabilities, set_count=10, seed=0, candidate_count=1600, scenario_count=2400):
     if not 1 <= set_count <= candidate_count:
         raise ValueError("invalid set_count")
@@ -349,9 +413,11 @@ def generate_prediction_sets(df, calculate_scores, set_count=10, target_draw=Non
         raise ValueError("target must follow the last training draw")
     probabilities, report = review_probabilities(df, calculate_scores, cache)
     seed = int(random_seed) if random_seed is not None else target * 10007 + len(df)
-    result = select_portfolio(probabilities, set_count=set_count, seed=seed)
-    report["selection_policy"] = "balanced_exposure_then_pair_reuse_then_weighted_odds"
+    result = select_whole_ticket_portfolio(probabilities, set_count=set_count, seed=seed)
+    report["combination_selection"] = result.attrs["combination_selection"]
+    report["selection_policy"] = report["combination_selection"]["policy"]
     report["selection_seed"] = seed
+    report["inclusion_estimates"] = probabilities.tolist()
     report["portfolio_diagnostics"] = portfolio_diagnostics(result[NUMBER_COLUMNS].to_numpy())
     result.attrs["weekly_review"] = report
     return result
@@ -366,7 +432,12 @@ def ticket_hits(tickets, actual):
 def summarize(records):
     """회차별 같은 세트 예산의 결과를 요약한다. 최고 적중은 회차마다 따로 구한다."""
     best = [max(row["hits"]) for row in records]
-    return {"draws": len(records), "mean_ticket_hits": float(np.mean([row["hits"] for row in records])),
+    result = {"draws": len(records), "mean_ticket_hits": float(np.mean([np.mean(row["hits"]) for row in records])),
             "mean_best_hits": float(np.mean(best)),
             "zero_hit_draws": sum(h == 0 for h in best),
             "draws_at_least": {str(n): sum(h >= n for h in best) for n in range(1, 7)}}
+    if records and all("fragmentation_gap" in row for row in records):
+        result.update(mean_fragmentation_gap=float(np.mean([row["fragmentation_gap"] for row in records])),
+                      all_six_scattered_draws=sum(row["all_six_scattered"] for row in records),
+                      exact_six_draws=sum(h == 6 for h in best))
+    return result

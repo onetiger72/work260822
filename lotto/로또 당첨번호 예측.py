@@ -6,7 +6,7 @@
 대상 회차 검증 후 저장하며, 기존 예측번호를 사후 결과에 맞춰 바꾸지 않는다.
 영구 데이터는 당첨 이력과 예상번호 CSV 두 개뿐이다. --audit-only 경로는
 파일을 변경하지 않는다. 통계 점수와 분산 선택은 당첨을 보장하지 않는다.
-"""
+"""            
 
 import os
 
@@ -17,7 +17,8 @@ from lotto_storage import load_history, load_predictions, validate_prediction_hi
 
 from lotto_weekly import latest_completed_draw, verify_latest_result
 
-from lotto_portfolio import generate_prediction_sets as generate_main_hit_portfolio
+from lotto_portfolio import (combination_hit_diagnostics,
+                             generate_prediction_sets as generate_main_hit_portfolio)
 
 import math
 
@@ -656,6 +657,11 @@ PREDICTION_FEEDBACK_COLUMNS = [
     "세트수",
     "평균본번호적중",
     "최고본번호적중",
+    "전체포함본번호수",
+    "분산손실",
+    "6개전체포함",
+    "6개분산미완성",
+    "6개완전적중세트수",
     "번호커버리지",
     "기대커버리지",
     "최대번호노출률",
@@ -1393,7 +1399,7 @@ def calculate_prediction_feedback(prediction_df):
     노출 비율은 보정 모델의 q와 다릅니다. 여기의 Brier skill은 저장 조합의
     진단값이며 모델 확률의 독립 성능이나 추첨 전 발행 사실을 입증하지 않습니다.
     38회 사전표본 수축으로 계산하는 두 보강 계수는 구형 호환용 반환값입니다.
-    현재 v6 생성기는 이 계수를 사용하지 않으며 화면에는 적중 요약만 제공합니다.
+    현재 생성기는 이 계수를 사용하지 않으며 화면에는 적중 요약만 제공합니다.
     """
 
     empty_summary = {
@@ -1401,6 +1407,9 @@ def calculate_prediction_feedback(prediction_df):
         "mean_brier_skill": 0.0,
         "mean_main_hits": 0.0,
         "best_main_hits": 0,
+        "mean_best_main_hits": 0.0,
+        "all_six_scattered_draws": 0,
+        "exact_six_draws": 0,
         "mean_coverage": 0.0,
         "mean_max_exposure": 0.0,
         "reliability": 0.0,
@@ -1476,6 +1485,11 @@ def calculate_prediction_feedback(prediction_df):
             "세트수": set_count,
             "평균본번호적중": round(sum(hit_counts) / set_count, 6),
             "최고본번호적중": max(hit_counts),
+            "전체포함본번호수": len(set(exposure_counts) & actual_numbers),
+            "분산손실": len(set(exposure_counts) & actual_numbers) - max(hit_counts),
+            "6개전체포함": int(actual_numbers.issubset(exposure_counts)),
+            "6개분산미완성": int(actual_numbers.issubset(exposure_counts) and max(hit_counts) < 6),
+            "6개완전적중세트수": hit_counts.count(6),
             "번호커버리지": len(exposure_counts),
             "기대커버리지": round(expected_coverage, 6),
             "최대번호노출률": round(max(exposures.values()), 6),
@@ -1535,6 +1549,9 @@ def calculate_prediction_feedback(prediction_df):
         "best_main_hits": int(
             detail_df["최고본번호적중"].max()
         ),
+        "mean_best_main_hits": float(detail_df["최고본번호적중"].mean()),
+        "all_six_scattered_draws": int(detail_df["6개분산미완성"].sum()),
+        "exact_six_draws": int((detail_df["6개완전적중세트수"] > 0).sum()),
         "mean_coverage": mean_coverage,
         "mean_max_exposure": mean_max_exposure,
         "reliability": reliability,
@@ -1563,7 +1580,7 @@ def generate_prediction_sets(
         df, set_count=PREDICTION_SET_COUNT, random_seed=None, target_draw=None,
         method_performance_df=None, prediction_feedback=None, llm_audit=None
 ):
-    """기법별 순차 검증 후 번호 노출을 분산한 6개 번호 조합을 생성합니다.
+    """기법별 순차 검증 후 한 세트의 6개 전체 일치를 목표로 조합을 선택합니다.
 
     과거 호환 인수인 가중치/노출 피드백/LLM 제안은 이 모델에 적용하지 않습니다.
     조합점수는 번호 포함 추정치 합이며 당첨확률이 아닙니다.
@@ -1729,6 +1746,15 @@ def _print_new_evaluation_summary(
         print("=" * 70)
         print(f"실제 당첨번호 : {actual_numbers} + {actual_bonus}")
         print(f"예측 세트 중 최고 본번호 적중수 : {int(hit_counts.max())}개")
+        combination = combination_hit_diagnostics(
+            result[NUMBER_COLUMNS].to_numpy(),
+            [int(result.iloc[0][f"실제번호{i}"]) for i in range(1, 7)],
+        )
+        print(f"전체 세트에 포함된 본번호 : {combination['union_main_hits']}개, "
+              f"한 세트와의 적중 차이 : {combination['fragmentation_gap']}개")
+        if combination["all_six_scattered"]:
+            print("본번호 6개가 전체에는 있으나 여러 세트에 흩어져 6개 완전 적중은 없습니다.")
+        print(f"본번호 6개 완전 적중 세트 : {combination['exact_six_sets']}개")
         print(f"최고 당첨 등수 : {best_prize}")
         print(
             "5등 이상 당첨 세트 수 : "
@@ -1764,6 +1790,11 @@ def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None):
             "main_hits": pd.to_numeric(previous["본번호일치수"], errors="coerce").dropna().astype(int).tolist(),
             "limits": "저장 시점이 확인되지 않는 기록은 사전 예측 성과를 입증하지 않습니다.",
         }
+        if not previous.empty:
+            weekly_report["previous_prediction_evaluation"].update(combination_hit_diagnostics(
+                previous[NUMBER_COLUMNS].to_numpy(),
+                df.loc[df["회차"] == latest_round, NUMBER_COLUMNS].iloc[0].tolist(),
+            ))
         current_prediction = generated[["세트"] + NUMBER_COLUMNS].copy()
         current_prediction["예측회차"] = target_draw
         current_prediction["종합점수"] = generated["조합점수"].round(6)
@@ -1792,10 +1823,13 @@ def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None):
     if not generated_now:
         print("이미 저장된 예측이 있어 새 세트를 중복 생성하지 않았습니다.")
     else:
-        print("기법별 사전 검증·반영 강도 검증·번호 노출 분산 방식으로 생성했습니다.")
+        print("기법별 사전 검증·반영 강도 검증 후 6개 전체 조합을 평가해 생성했습니다.")
     print("종합점수는 모델의 본번호 포함 추정치 합이며 1등 당첨확률이 아닙니다.")
     print(f"기존 예측 평가: {prediction_feedback['evaluated_draws']}회, "
           f"평균 본번호 적중 {prediction_feedback['mean_main_hits']:.3f}개")
+    print(f"회차별 한 세트 최고 적중 평균 {prediction_feedback['mean_best_main_hits']:.3f}개, "
+          f"6개가 흩어진 회차 {prediction_feedback['all_six_scattered_draws']}회, "
+          f"한 세트 6개 적중 회차 {prediction_feedback['exact_six_draws']}회")
     print(f"회차별 예상번호/평가 이력 저장 완료: {filename}")
     current_prediction.attrs["weekly_review"] = weekly_report
     current_prediction.attrs["final_review"] = final_audit

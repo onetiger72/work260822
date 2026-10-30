@@ -1,10 +1,11 @@
-"""시간 순서 비교: 과거 v4, 현재 모델, 동일 분산의 균등확률, 일반 무작위.
+"""시간 순서 비교: v4, 전체 조합 선택, v6 분산 선택, 균등확률, 일반 무작위.
 
-현재 모델과 balanced_uniform은 같은 선택기·세트 수·시드를 사용한다. 따라서
-둘의 차이는 학습한 q의 효과이고, balanced_uniform과 일반 무작위의 차이는
-분산 규칙의 효과다. 모든 상세 결과는 메모리로 반환하며 파일을 만들지 않는다.
+현재 모델과 weighted_balanced는 같은 q·세트 수·시드를 사용해 조합 정책을 비교한다.
+balanced_uniform은 현재 선택기에 균등 q를 전달한다. 학습과 선택 정책의 결합 효과를
+순수한 학습 효과로 해석하지 않는다. 결과는 메모리로 반환하며 파일을 만들지 않는다.
 """
 import importlib.util
+import argparse
 import json
 from pathlib import Path
 
@@ -38,24 +39,33 @@ def paired_comparison(model_records, baseline_records):
             "ties": int(np.count_nonzero(np.abs(deltas) <= 1e-12)),
             "losses": int(np.count_nonzero(deltas < -1e-12)),
         }
+    for threshold in range(3, 7):
+        model_count = sum(max(row["hits"]) >= threshold for row in model_records)
+        baseline_count = sum(max(row["hits"]) >= threshold for row in baseline_records)
+        result[f"draws_at_least_{threshold}"] = {
+            "model": model_count, "baseline": baseline_count,
+            "model_minus_baseline": model_count - baseline_count,
+        }
     return result
 
 
-def run_benchmark(history, calculate_scores, old_model, draws=60, repetitions=100):
+def run_benchmark(history, calculate_scores, old_model, draws=60, repetitions=100, set_count=10):
     """고정 규칙으로 과거 회차만 재생한다. 이 결과를 보고 규칙을 재조정하지 않는다.
 
-    반복 횟수는 일반 무작위 기준의 시드 편차를 줄이기 위한 것이다. 현재 모델과
-    균등 분산 기준은 실제 기본 생성과 같은 회차별 시드를 사용해 짝지어 비교한다.
+    반복 횟수는 일반 무작위 기준의 시드 편차를 줄이기 위한 것이다. 현재 모델,
+    v6 분산 기준과 균등 기준을 같은 세트 수·회차별 시드로 짝지어 비교한다.
     """
     validate_history(history)
     if not isinstance(draws, int) or draws < 1 or not isinstance(repetitions, int) or repetitions < 1:
         raise ValueError("draws and repetitions must be positive integers")
+    if isinstance(set_count, bool) or not isinstance(set_count, int) or not 1 <= set_count <= 10:
+        raise ValueError("set_count must be between 1 and 10")
     if len(history) <= 200:
         raise ValueError("benchmark requires at least 201 historical draws")
     history = history.sort_values("회차").reset_index(drop=True)
     # 캐시를 파일에서 읽거나 다른 이력과 공유하지 않는다. 공통 과거 접두 구간의
     # 원시 특징만 재사용하며, 모델별 선택/보정 결과는 각각 다시 계산한다.
-    cache, records = {}, {"v4": [], "model": [], "balanced_uniform": []}
+    cache, records = {}, {"v4": [], "model": [], "weighted_balanced": [], "balanced_uniform": []}
     uniform = [[] for _ in range(repetitions)]
     start = max(200, len(history) - draws)
     for n in range(max(150, start - 168), len(history)):
@@ -66,13 +76,19 @@ def run_benchmark(history, calculate_scores, old_model, draws=60, repetitions=10
     for n in range(start, len(history)):
         target = int(history.iloc[n]["회차"])
         actual = history.iloc[n][current.NUMBER_COLUMNS].tolist()
-        generated = current.generate_prediction_sets(history.iloc[:n], calculate_scores, cache=cache)
+        generated = current.generate_prediction_sets(history.iloc[:n], calculate_scores, cache=cache,
+                                                      set_count=set_count)
         review = generated.attrs["weekly_review"]
-        # 확률만 6/45로 바꾸고 선택기/시드는 같게 둔다. 모든 기법이 제외되어
-        # 모델도 균등확률이면 두 결과가 완전히 같아야 한다.
-        balanced = current.select_portfolio(np.full(45, 6 / 45), seed=review["selection_seed"])
-        batches = {"v4": old_model.generate_prediction_sets(history.iloc[:n], calculate_scores, cache=cache),
-                   "model": generated, "balanced_uniform": balanced}
+        # 균등 q에는 같은 진입점의 동점 정책이 적용된다. 모든 기법이 제외되어
+        # 모델도 균등확률이면 두 결과가 완전히 같아야 한다. 비균등 회차의
+        # 차이는 q와 선택 정책의 결합 효과이며 순수 신호 효과가 아니다.
+        balanced = current.select_whole_ticket_portfolio(np.full(45, 6 / 45), set_count=set_count,
+                                                         seed=review["selection_seed"])
+        weighted_balanced = current.select_portfolio(review["inclusion_estimates"], set_count=set_count,
+                                                     seed=review["selection_seed"])
+        batches = {"v4": old_model.generate_prediction_sets(history.iloc[:n], calculate_scores, cache=cache,
+                                                            set_count=set_count),
+                   "model": generated, "weighted_balanced": weighted_balanced, "balanced_uniform": balanced}
         identical_ticket_draws += int(np.array_equal(generated[current.NUMBER_COLUMNS].to_numpy(),
                                                      balanced[current.NUMBER_COLUMNS].to_numpy()))
         active_signal_draws += int(bool(review["effective_methods"]))
@@ -80,28 +96,33 @@ def run_benchmark(history, calculate_scores, old_model, draws=60, repetitions=10
             numbers = tickets[current.NUMBER_COLUMNS].to_numpy()
             records[name].append({"target_draw": target, "hits": current.ticket_hits(numbers, actual),
                                   **current.portfolio_diagnostics(numbers),
+                                  **current.combination_hit_diagnostics(numbers, actual),
                                   "selected_strength": tickets.attrs.get("weekly_review", {}).get("selected_strength", 0.0)})
         for repetition in range(repetitions):
             rng = np.random.default_rng(7321 + 1000 * target + repetition)
             tickets = set()
-            while len(tickets) < 10:
+            while len(tickets) < set_count:
                 tickets.add(tuple(sorted(rng.choice(np.arange(1, 46), 6, replace=False))))
-            uniform[repetition].append({"hits": current.ticket_hits(tickets, actual)})
+            uniform[repetition].append({"hits": current.ticket_hits(tickets, actual),
+                                        **current.combination_hit_diagnostics(tickets, actual)})
         if (n - start + 1) % 5 == 0:
             print(f"Past-draw comparison {n - start + 1}/{len(history) - start}", flush=True)
     summaries = [current.summarize(rows) for rows in uniform]
-    report = {"version": current.VERSION, "old_version": old_model.VERSION,
+    report = {"version": current.VERSION, "old_version": old_model.VERSION, "set_count": set_count,
               "history_sha256": current.history_fingerprint(history),
               "first_draw": int(history.iloc[start]["회차"]), "last_draw": int(history.iloc[-1]["회차"]),
               "protocol": "Fixed rules before replay; only prior draws per target, fresh feature cache. Retrospective, not unseen prospective proof. No current-week tickets generated.",
               "summaries": {name: current.summarize(rows) for name, rows in records.items()},
               "balanced_baseline": {"same_selector_and_seed": True,
+                                    "interpretation": "Joint signal and conditional selection-policy effect; not pure learning gain.",
                                     "identical_ticket_draws": identical_ticket_draws,
                                     "active_signal_draws": active_signal_draws},
               "model_vs_balanced_uniform": paired_comparison(records["model"], records["balanced_uniform"]),
+              "model_vs_weighted_balanced": paired_comparison(records["model"], records["weighted_balanced"]),
               "uniform_runs": {"repetitions": repetitions,
                                **{key: float(np.mean([s[key] for s in summaries]))
-                                  for key in ["mean_ticket_hits", "mean_best_hits", "zero_hit_draws"]},
+                                  for key in ["mean_ticket_hits", "mean_best_hits", "zero_hit_draws",
+                                              "mean_fragmentation_gap", "all_six_scattered_draws", "exact_six_draws"]},
                                "mean_draws_at_least": {str(k): float(np.mean([s["draws_at_least"][str(k)] for s in summaries]))
                                                        for k in range(1, 7)}},
               "records": records}
@@ -110,10 +131,16 @@ def run_benchmark(history, calculate_scores, old_model, draws=60, repetitions=10
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sets", type=int, default=10, choices=range(1, 11))
+    parser.add_argument("--draws", type=int, default=60)
+    parser.add_argument("--repetitions", type=int, default=100)
+    args = parser.parse_args()
     base = Path(__file__).resolve().parent
     app = load_module("audit_app", base / "로또 당첨번호 예측.py")
     old = load_module("portfolio_v4", base / "analysis_cache/portfolio_v4.py")
-    return run_benchmark(load_history(app.CSV_FILE), app.calculate_analysis_scores, old)
+    return run_benchmark(load_history(app.CSV_FILE), app.calculate_analysis_scores, old,
+                         draws=args.draws, repetitions=args.repetitions, set_count=args.sets)
 
 
 if __name__ == "__main__":

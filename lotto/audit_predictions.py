@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from lotto_portfolio import NUMBER_COLUMNS, portfolio_diagnostics, review_probabilities, ticket_hits
+from lotto_portfolio import (NUMBER_COLUMNS, combination_hit_diagnostics,
+                             portfolio_diagnostics, review_probabilities, ticket_hits)
 from lotto_validation import strict_int, validate_draw, validate_history
 from lotto_storage import load_history, load_predictions, validate_prediction_history
 from lotto_weekly import latest_completed_draw
@@ -41,6 +42,7 @@ def compare_saved_predictions(history, predictions):
             record.update(actual=actual, main_hits=hits, bonus_hits=bonus,
                           best_main_hits=max(hits), mean_main_hits=sum(hits) / len(hits),
                           zero_hit_sets=hits.count(0))
+            record.update(combination_hit_diagnostics(tickets, [actual[c] for c in NUMBER_COLUMNS]))
             stale = []
             for (_, row), main, extra in zip(group.iterrows(), hits, bonus):
                 for column, expected in [("본번호일치수", main), ("보너스일치", extra),

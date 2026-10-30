@@ -90,6 +90,78 @@ class ProbabilityTests(unittest.TestCase):
 
 
 class TicketTests(unittest.TestCase):
+    def test_whole_ticket_selection_keeps_six_high_candidates_together_for_5_and_10_sets(self):
+        q = np.r_[np.linspace(0.30, 0.20, 6), np.linspace(0.10, 0.05, 39)]
+        for count in (5, 10):
+            result = portfolio.select_whole_ticket_portfolio(q, set_count=count, seed=42)
+            numbers = result[portfolio.NUMBER_COLUMNS].to_numpy()
+            self.assertEqual(len(numbers), count)
+            self.assertEqual(len({tuple(row) for row in numbers}), count)
+            self.assertEqual(numbers[0].tolist(), [1, 2, 3, 4, 5, 6])
+            # 같은 모델 q를 번호별 노출 제약으로 분해한 정책과 직접 비교한다.
+            balanced = portfolio.select_portfolio(q, set_count=count, seed=42)
+            selection = result.attrs["combination_selection"]
+            odds = q / (1 - q)
+            selected_mass = np.prod(odds[numbers - 1], axis=1).sum()
+            balanced_mass = np.prod(odds[balanced[portfolio.NUMBER_COLUMNS].to_numpy() - 1], axis=1).sum()
+            self.assertGreater(selected_mass, balanced_mass)
+            self.assertEqual(selection["policy"], "top_distinct_whole_tickets")
+            self.assertTrue(0 < selection["portfolio_model_exact_six_mass"] < 1)
+
+    def test_whole_ticket_mass_normalizes_against_exhaustive_symmetric_sum(self):
+        # 동점이 많은 입력에서도 모든 6개 조합의 곱을 합친 정규화와 일치한다.
+        q = np.r_[np.full(8, 0.2), np.full(37, 0.01)]
+        from math import comb
+        a, b = 0.2 / 0.8, 0.01 / 0.99
+        denominator = sum(comb(8, k) * comb(37, 6 - k) * a ** k * b ** (6 - k)
+                          for k in range(7))
+        result = portfolio.select_whole_ticket_portfolio(q, set_count=5, seed=4)
+        masses = result.attrs["combination_selection"]["per_ticket_model_mass"]
+        np.testing.assert_allclose(masses, np.full(5, a ** 6 / denominator), rtol=1e-12)
+
+    def test_uniform_whole_ticket_fallback_preserves_seed_and_exact_probability(self):
+        from math import comb
+        for count in (5, 10):
+            q = np.full(45, 6 / 45)
+            actual = portfolio.select_whole_ticket_portfolio(q, set_count=count, seed=19)
+            expected = portfolio.select_portfolio(q, set_count=count, seed=19)
+            pd.testing.assert_frame_equal(actual, expected)
+            selection = actual.attrs["combination_selection"]
+            self.assertEqual(selection["policy"], "balanced_uniform_tie")
+            self.assertAlmostEqual(selection["portfolio_model_exact_six_mass"], count / comb(45, 6), places=14)
+
+    def test_full_union_does_not_count_as_one_complete_ticket(self):
+        actual = [1, 2, 3, 4, 5, 6]
+        tickets = [[1, 2, 3, 10, 11, 12], [4, 5, 6, 13, 14, 15]]
+        report = portfolio.combination_hit_diagnostics(tickets, actual)
+        self.assertEqual(report["union_main_hits"], 6)
+        self.assertEqual(report["best_main_hits"], 3)
+        self.assertEqual(report["fragmentation_gap"], 3)
+        self.assertTrue(report["all_six_scattered"])
+        self.assertEqual(report["exact_six_sets"], 0)
+        report = portfolio.combination_hit_diagnostics(tickets + [actual], actual)
+        self.assertFalse(report["all_six_scattered"])
+        self.assertEqual(report["fragmentation_gap"], 0)
+        self.assertEqual(report["exact_six_sets"], 1)
+        self.assertEqual(report["sets_at_least"], {"3": 3, "4": 1, "5": 1, "6": 1})
+
+    def test_new_generator_routes_validated_estimates_to_whole_ticket_selection(self):
+        history = make_history(4)
+        q = np.r_[np.full(6, 0.3), np.full(39, (6 - 1.8) / 39)]
+        with patch.object(portfolio, "review_probabilities", return_value=(q, {"effective_methods": ["signal"]})):
+            result = portfolio.generate_prediction_sets(history, lambda _: {}, set_count=5, random_seed=18)
+        self.assertEqual(result.iloc[0][portfolio.NUMBER_COLUMNS].tolist(), list(range(1, 7)))
+        self.assertEqual(result.attrs["weekly_review"]["selection_policy"], "top_distinct_whole_tickets")
+        np.testing.assert_allclose(result.attrs["weekly_review"]["inclusion_estimates"], q)
+
+    def test_whole_ticket_selection_rejects_invalid_counts_and_probabilities(self):
+        for count in (0, 11, True, 5.5):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                portfolio.select_whole_ticket_portfolio(np.full(45, 6 / 45), set_count=count)
+        for q in (np.full(44, 0.1), np.full(45, np.nan), np.zeros(45), np.ones(45)):
+            with self.assertRaises(ValueError):
+                portfolio.select_whole_ticket_portfolio(q)
+
     def test_ranked_sets_match_exhaustive_model_optimum_and_repeat_core(self):
         probabilities = np.full(45, 0.00001)
         probabilities[:9] = np.linspace(0.29, 0.12, 9)
