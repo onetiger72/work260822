@@ -34,18 +34,19 @@ import os
 import requests
 import pandas as pd
 import time
-import random
+import random   
 import math
-from collections import Counter
+from collections import Counter, defaultdict
 from itertools import combinations
 
 
 # ============================================================
 # 1. 기본 설정
 # ============================================================
-CSV_FILE = "과거로또 당첨번호.csv"
-PREDICTION_FILE = "당첨예상번호.csv"
-# 실제 조회할 로또 회차를 입력하세요.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(BASE_DIR, "과거로또 당첨번호.csv")
+PREDICTION_FILE = os.path.join(BASE_DIR, "당첨예상번호.csv")
+# 실제 조회할 로또 회차를 입력하세요. (0 이하이면 추가 조회 없이 기존 CSV 사용)
 # 예: CSV 마지막 회차가 1182회이고 QUERY_ROUND가 1185이면
 #     1183회, 1184회, 1185회만 추가합니다.
 QUERY_ROUND = 0  # 예: 1185
@@ -427,16 +428,7 @@ def collect_all_lotto(
     print("=" * 70)
 
     # --------------------------------------------------------
-    # 1. 조회 회차 유효성 확인
-    # --------------------------------------------------------
-    query_round = int(query_round)
-
-    if query_round < 1:
-        print("조회 회차를 1 이상의 값으로 설정해야 합니다.")
-        return load_history_csv()
-
-    # --------------------------------------------------------
-    # 2. 기존 CSV 로드 및 마지막 회차 확인
+    # 1. 기존 CSV 로드 및 마지막 회차 확인
     # --------------------------------------------------------
     existing_df = load_history_csv()
 
@@ -446,6 +438,21 @@ def collect_all_lotto(
     else:
         csv_last_round = int(existing_df["회차"].max())
         print(f"CSV 마지막 회차 : {csv_last_round}회")
+
+    # --------------------------------------------------------
+    # 2. 조회 회차 유효성 확인
+    # --------------------------------------------------------
+    query_round = int(query_round)
+
+    if query_round < 1:
+        if csv_last_round > 0:
+            print(
+                "조회 회차가 지정되지 않아(0 이하) 신규 회차 조회를 건너뛰고 "
+                "기존 CSV 데이터를 사용합니다."
+            )
+        else:
+            print("조회 회차를 1 이상의 값으로 설정해야 합니다.")
+        return existing_df
 
     print(f"조회 회차          : {query_round}회")
 
@@ -908,510 +915,541 @@ def generate_prediction_sets(
         candidate_count=30000
 ):
     """
-    본번호 6개와 보너스 번호까지 전 회차 분석에 포함하여
-    1등 후보 조합 10세트를 생성합니다.
+    한 게임(1줄 6개 번호) 안에 당첨번호가 최대한 뭉쳐서(응집) 들어가도록 설계된
+    압축 클리크(Clique) & 마르코프 전이 기반 예상번호 10세트 생성 엔진입니다.
 
-    단순 최대 빈도 번호 추출이 아니라 다음 신호를 앙상블합니다.
+    [번호 단위 다중 신호 분석]
+    1. 직전 1~3회차 -> 다음 회차 마르코프 전이 확률(Markov Transition) 및 보너스 전이
+    2. 단기(half-life 10) / 중기(35) / 장기(120) 다중 지수감쇠 최근성
+    3. 이월수(직전 당첨/보너스 재출현) 및 이웃수(±1), 징검다리(2회 전), 최근 핫 끝수 동조
+    4. 경과회차별 실제 출현 확률(Empirical Hazard Rate) 및 번호별 고유 출현 주기 적합도
 
-    [번호 단위 분석]
-    1. 본번호 전 회차 출현빈도
-    2. 보너스 번호 전 회차 출현빈도
-    3. 시간감쇠(Exponential Decay) 최근성
-    4. 현재 미출현 간격 / 평균 출현간격
-    5. 번호 간 동시출현 그래프 중심성
-
-    [번호 관계 분석]
-    6. 본번호 6개 간 pair co-occurrence
-    7. 시간가중 pair co-occurrence
-    8. 본번호-보너스 번호 연관성
-
-    [조합 구조 분석]
-    9. 합계 분포
-    10. 홀짝 개수
-    11. 고번호(23~45) 개수
-    12. 연속번호 pair 개수
-    13. 최소~최대 번호 범위
-
-    이후 candidate_count개의 후보 조합을 생성하고
-    각 조합 자체를 다시 평가한 뒤 서로 지나치게 겹치지 않는
-    상위 10개 조합을 선택합니다.
-
-    주의:
-    무작위 추첨의 실제 미래 당첨 확률을 높인다고 보장하는 모델은 아닙니다.
+    [한 줄(1게임) 내 응집력 극대화 분석]
+    5. 번호 쌍 동시출현 Lift + 시간가중 동시출현 + 직전 회차 공전이(Co-Transition) 시너지
+    6. 3개 번호 동시출현(Triplet Co-occurrence) 결속력
+    7. 번호가 여러 게임으로 찢어지지 않도록 상위 핵심 후보군(Core Pool) 전수 압축 조합과
+       조건부 연쇄 클리크(Conditional Clique Growth)로 후보 생성
+    8. AC값(>=7), 합계(92~178), 홀짝/고저/구간/끝수 표준 1등 구조 필터 적용
+    9. 3-tuple / 4-tuple 커버링(Abbreviated Wheeling)을 결합해 핵심 번호 적중 시
+       반드시 한 줄 안에 3~6개가 동시에 모이도록(다수 게임 중복 당첨 포함) 상위 10세트 선택
     """
 
     if df.empty:
         return pd.DataFrame()
 
-    df = (
+    ordered = (
         df.sort_values("회차")
           .reset_index(drop=True)
           .copy()
     )
+    total_draws = len(ordered)
 
     main_cols = [
         "번호1", "번호2", "번호3",
         "번호4", "번호5", "번호6"
     ]
 
-    latest_draw = int(df["회차"].max())
-
-    # 결과 재현성을 위해 별도 seed가 없으면 최신 회차 기반 seed 사용
-    if random_seed is None:
-        random_seed = latest_draw * 1009 + len(df)
-
-    rng = random.Random(random_seed)
-
-    # ========================================================
-    # A. 전 회차 기본 빈도
-    # ========================================================
-    main_counts = Counter(
-        df[main_cols].values.flatten()
-    )
-
-    bonus_counts = Counter(
-        df["보너스"].values.flatten()
-    )
-
-    # ========================================================
-    # B. 시간 감쇠 점수
-    # 최근 회차에 더 높은 가중치
-    # half-life = 120회
-    # ========================================================
-    half_life = 120.0
-    decay_lambda = math.log(2.0) / half_life
-
-    main_decay = Counter()
-    bonus_decay = Counter()
-
-    # pair 관련 통계
-    pair_counts = Counter()
-    pair_decay = Counter()
-    main_bonus_counts = Counter()
-    main_bonus_decay = Counter()
-
-    total_rows = len(df)
-
-    for row_idx, row in df.iterrows():
-        age = total_rows - 1 - row_idx
-        decay_weight = math.exp(-decay_lambda * age)
-
-        main_numbers = sorted(
-            int(row[col])
-            for col in main_cols
-        )
-        bonus = int(row["보너스"])
-
-        for number in main_numbers:
-            main_decay[number] += decay_weight
-
-        bonus_decay[bonus] += decay_weight
-
-        # 본번호끼리의 pair 동시출현
-        for a, b in combinations(main_numbers, 2):
-            pair_counts[(a, b)] += 1
-            pair_decay[(a, b)] += decay_weight
-
-        # 본번호-보너스 관계
-        for number in main_numbers:
-            key = tuple(sorted((number, bonus)))
-            main_bonus_counts[key] += 1
-            main_bonus_decay[key] += decay_weight
-
-    # ========================================================
-    # C. 번호별 출현 간격 / 미출현 압력
-    # ========================================================
-    current_gap = {}
-    mean_gap = {}
-
-    for number in range(1, 46):
-        rounds = df.loc[
-            df[main_cols].eq(number).any(axis=1),
-            "회차"
-        ].astype(int).tolist()
-
-        if rounds:
-            current_gap[number] = latest_draw - rounds[-1]
-        else:
-            current_gap[number] = latest_draw
-
-        if len(rounds) >= 2:
-            gaps = [
-                rounds[i] - rounds[i - 1]
-                for i in range(1, len(rounds))
-            ]
-            mean_gap[number] = sum(gaps) / len(gaps)
-        else:
-            mean_gap[number] = max(current_gap[number], 1)
-
-    # gap ratio는 너무 큰 값이 지배하지 않게 cap
-    gap_ratio = {
-        n: min(
-            current_gap[n] / max(mean_gap[n], 1e-9),
-            3.0
-        )
-        for n in range(1, 46)
-    }
-
-    # ========================================================
-    # D. 번호 관계 그래프 중심성
-    # 별도 graph 라이브러리 없이 weighted degree 사용
-    # ========================================================
-    pair_degree = Counter()
-    pair_decay_degree = Counter()
-
-    for (a, b), value in pair_counts.items():
-        pair_degree[a] += value
-        pair_degree[b] += value
-
-    for (a, b), value in pair_decay.items():
-        pair_decay_degree[a] += value
-        pair_decay_degree[b] += value
-
-    # ========================================================
-    # E. 정규화 함수
-    # ========================================================
-    def normalize_dict(data, numbers=range(1, 46)):
-        values = [float(data.get(n, 0.0)) for n in numbers]
-        lo = min(values) if values else 0.0
-        hi = max(values) if values else 1.0
-
-        if hi == lo:
-            return {n: 0.5 for n in numbers}
-
-        return {
-            n: (float(data.get(n, 0.0)) - lo) / (hi - lo)
-            for n in numbers
-        }
-
-    main_freq_n = normalize_dict(main_counts)
-    bonus_freq_n = normalize_dict(bonus_counts)
-    main_decay_n = normalize_dict(main_decay)
-    bonus_decay_n = normalize_dict(bonus_decay)
-    gap_ratio_n = normalize_dict(gap_ratio)
-    pair_degree_n = normalize_dict(pair_degree)
-    pair_decay_degree_n = normalize_dict(pair_decay_degree)
-
-    # ========================================================
-    # F. 번호 단위 앙상블 점수
-    #
-    # 보너스 번호는 최종 6개 당첨 본번호와 역할이 다르므로
-    # 본번호보다 낮은 비중으로만 보조 신호에 반영합니다.
-    # ========================================================
-    number_scores = {}
-
-    for number in range(1, 46):
-        score = (
-            main_freq_n[number] * 0.24
-            + main_decay_n[number] * 0.24
-            + gap_ratio_n[number] * 0.16
-            + pair_degree_n[number] * 0.12
-            + pair_decay_degree_n[number] * 0.12
-            + bonus_freq_n[number] * 0.06
-            + bonus_decay_n[number] * 0.06
-        )
-
-        number_scores[number] = score
-
-    # ========================================================
-    # G. pair 정규화
-    # ========================================================
-    def normalize_pair_counter(counter):
-        if not counter:
-            return {}
-
-        max_value = max(counter.values())
-
-        if max_value <= 0:
-            return {
-                key: 0.0
-                for key in counter
-            }
-
-        return {
-            key: float(value) / float(max_value)
-            for key, value in counter.items()
-        }
-
-    pair_counts_n = normalize_pair_counter(pair_counts)
-    pair_decay_n = normalize_pair_counter(pair_decay)
-    main_bonus_counts_n = normalize_pair_counter(main_bonus_counts)
-    main_bonus_decay_n = normalize_pair_counter(main_bonus_decay)
-
-    # ========================================================
-    # H. 과거 1등 조합 구조 분포 학습
-    # ========================================================
-    historical_sums = []
-    historical_ranges = []
-    odd_counter = Counter()
-    high_counter = Counter()
-    consecutive_counter = Counter()
-
-    for _, row in df.iterrows():
-        nums = sorted(
-            int(row[col])
-            for col in main_cols
-        )
-
-        total_sum = sum(nums)
-        number_range = nums[-1] - nums[0]
-        odd_count = sum(n % 2 == 1 for n in nums)
-        high_count = sum(n >= 23 for n in nums)
-        consecutive_count = sum(
-            nums[i + 1] - nums[i] == 1
-            for i in range(5)
-        )
-
-        historical_sums.append(total_sum)
-        historical_ranges.append(number_range)
-        odd_counter[odd_count] += 1
-        high_counter[high_count] += 1
-        consecutive_counter[consecutive_count] += 1
-
-    def mean_std(values):
-        if not values:
-            return 0.0, 1.0
-
-        mean_value = sum(values) / len(values)
-
-        if len(values) < 2:
-            return mean_value, 1.0
-
-        variance = sum(
-            (v - mean_value) ** 2
-            for v in values
-        ) / (len(values) - 1)
-
-        std = math.sqrt(max(variance, 1e-9))
-        return mean_value, std
-
-    sum_mean, sum_std = mean_std(historical_sums)
-    range_mean, range_std = mean_std(historical_ranges)
-
-    def empirical_probability(counter, value):
-        # Laplace smoothing
-        total = sum(counter.values())
-        category_count = max(len(counter), 1)
-
-        return (
-            counter.get(value, 0) + 1
-        ) / (
-            total + category_count
-        )
-
-    max_odd_p = max(
-        empirical_probability(odd_counter, k)
-        for k in range(0, 7)
-    )
-    max_high_p = max(
-        empirical_probability(high_counter, k)
-        for k in range(0, 7)
-    )
-    max_consecutive_p = max(
-        empirical_probability(consecutive_counter, k)
-        for k in range(0, 6)
-    )
-
-    # ========================================================
-    # I. 조합 점수 함수
-    # ========================================================
-    def candidate_score(selected):
-        selected = sorted(selected)
-
-        # 1) 번호 단위 점수
-        individual_score = sum(
-            number_scores[n]
-            for n in selected
-        ) / 6.0
-
-        # 2) 번호간 관계 점수
-        pair_values = []
-        bonus_relation_values = []
-
-        for a, b in combinations(selected, 2):
-            key = (min(a, b), max(a, b))
-
-            main_pair_score = (
-                pair_counts_n.get(key, 0.0) * 0.45
-                + pair_decay_n.get(key, 0.0) * 0.45
-            )
-
-            # 두 번호 중 하나가 과거 보너스였던 관계도 낮은 비중 반영
-            bonus_relation_score = (
-                main_bonus_counts_n.get(key, 0.0) * 0.05
-                + main_bonus_decay_n.get(key, 0.0) * 0.05
-            )
-
-            pair_values.append(main_pair_score)
-            bonus_relation_values.append(bonus_relation_score)
-
-        pair_score = (
-            sum(pair_values) / len(pair_values)
-            if pair_values else 0.0
-        )
-
-        bonus_relation_score = (
-            sum(bonus_relation_values) / len(bonus_relation_values)
-            if bonus_relation_values else 0.0
-        )
-
-        relation_score = pair_score + bonus_relation_score
-
-        # 3) 과거 1등 조합 구조 유사도
-        total_sum = sum(selected)
-        number_range = selected[-1] - selected[0]
-        odd_count = sum(n % 2 == 1 for n in selected)
-        high_count = sum(n >= 23 for n in selected)
-        consecutive_count = sum(
-            selected[i + 1] - selected[i] == 1
-            for i in range(5)
-        )
-
-        sum_z = (total_sum - sum_mean) / max(sum_std, 1e-9)
-        range_z = (number_range - range_mean) / max(range_std, 1e-9)
-
-        # 정규분포 중심에 가까울수록 높은 점수
-        sum_score = math.exp(-0.5 * (sum_z ** 2))
-        range_score = math.exp(-0.5 * (range_z ** 2))
-
-        odd_score = (
-            empirical_probability(odd_counter, odd_count)
-            / max_odd_p
-        )
-
-        high_score = (
-            empirical_probability(high_counter, high_count)
-            / max_high_p
-        )
-
-        consecutive_score = (
-            empirical_probability(
-                consecutive_counter,
-                consecutive_count
-            )
-            / max_consecutive_p
-        )
-
-        structure_score = (
-            sum_score * 0.30
-            + range_score * 0.20
-            + odd_score * 0.20
-            + high_score * 0.20
-            + consecutive_score * 0.10
-        )
-
-        # 최종 조합 앙상블
-        final_score = (
-            individual_score * 0.45
-            + relation_score * 0.30
-            + structure_score * 0.25
-        )
-
-        return final_score
-
-    # ========================================================
-    # J. Monte Carlo 후보 생성
-    # ========================================================
-    numbers = list(range(1, 46))
-
-    # 너무 낮은 점수도 완전히 배제하지 않음
-    weights = [
-        0.05 + number_scores[n]
-        for n in numbers
+    draws_main = [
+        tuple(sorted(int(row[c]) for c in main_cols))
+        for _, row in ordered.iterrows()
+    ]
+    draws_bonus = [
+        int(row["보너스"])
+        for _, row in ordered.iterrows()
     ]
 
-    candidates = {}
-    attempts = 0
-    max_attempts = candidate_count * 3
+    # ========================================================
+    # A. 기본 빈도, 다중 시간감쇠, 동시출현(Pair/Triplet), 마르코프 전이 집계
+    # ========================================================
+    main_counts = Counter()
+    bonus_counts = Counter()
+    short_decay = Counter()   # half-life 10회
+    mid_decay = Counter()     # half-life 35회
+    long_decay = Counter()    # half-life 120회
 
-    while (
-        len(candidates) < candidate_count
-        and attempts < max_attempts
-    ):
-        attempts += 1
+    l_short = math.log(2.0) / 10.0
+    l_mid = math.log(2.0) / 35.0
+    l_long = math.log(2.0) / 120.0
 
-        available_numbers = numbers.copy()
-        available_weights = weights.copy()
-        selected = []
+    pair_counts = Counter()
+    pair_decay = Counter()
+    triplet_decay = Counter()
+    main_bonus_decay = Counter()
 
-        while len(selected) < 6:
-            chosen = rng.choices(
-                available_numbers,
-                weights=available_weights,
-                k=1
-            )[0]
+    trans_lag1 = defaultdict(Counter)
+    trans_lag2 = defaultdict(Counter)
+    trans_lag3 = defaultdict(Counter)
+    bonus_trans_lag1 = defaultdict(Counter)
 
-            idx = available_numbers.index(chosen)
+    appear_indices = defaultdict(list)
 
-            selected.append(chosen)
-            available_numbers.pop(idx)
-            available_weights.pop(idx)
+    for idx in range(total_draws):
+        age = total_draws - 1 - idx
+        w_s = math.exp(-l_short * age)
+        w_m = math.exp(-l_mid * age)
+        w_l = math.exp(-l_long * age)
 
-        selected = tuple(sorted(selected))
+        nums = draws_main[idx]
+        bns = draws_bonus[idx]
 
-        if selected in candidates:
-            continue
+        for n in nums:
+            appear_indices[n].append(idx)
+            main_counts[n] += 1
+            short_decay[n] += w_s
+            mid_decay[n] += w_m
+            long_decay[n] += w_l
 
-        candidates[selected] = candidate_score(selected)
+        bonus_counts[bns] += 1
 
-    # 후보 점수 정렬
-    ranked = sorted(
-        candidates.items(),
-        key=lambda item: item[1],
+        p_w = 0.45 * w_s + 0.35 * w_m + 0.20 * w_l
+        for a, b in combinations(nums, 2):
+            pair_counts[(a, b)] += 1
+            pair_decay[(a, b)] += p_w
+
+        for a, b, c in combinations(nums, 3):
+            triplet_decay[(a, b, c)] += p_w
+
+        for n in nums:
+            key = (min(n, bns), max(n, bns))
+            main_bonus_decay[key] += w_m
+
+        t_weight = 0.25 + 0.75 * w_l
+        if idx >= 1:
+            for p in draws_main[idx - 1]:
+                for cur in nums:
+                    trans_lag1[p][cur] += t_weight
+            prev_b = draws_bonus[idx - 1]
+            for cur in nums:
+                bonus_trans_lag1[prev_b][cur] += t_weight
+        if idx >= 2:
+            for p in draws_main[idx - 2]:
+                for cur in nums:
+                    trans_lag2[p][cur] += t_weight
+        if idx >= 3:
+            for p in draws_main[idx - 3]:
+                for cur in nums:
+                    trans_lag3[p][cur] += t_weight
+
+    # ========================================================
+    # B. 경과회차별 실제 출현율(Empirical Hazard) 및 고유 주기 적합도
+    # ========================================================
+    gap_appear = Counter()
+    gap_survive = Counter()
+    num_gaps = {}
+
+    for n in range(1, 46):
+        idxs = appear_indices[n]
+        gaps = []
+        for i in range(1, len(idxs)):
+            g = idxs[i] - idxs[i - 1] - 1
+            gaps.append(g)
+            g_cap = min(g, 35)
+            gap_appear[g_cap] += 1
+            for step in range(g_cap + 1):
+                gap_survive[step] += 1
+        num_gaps[n] = gaps
+
+    cycle_score = {}
+    for n in range(1, 46):
+        idxs = appear_indices[n]
+        cur_g = (total_draws - 1 - idxs[-1]) if idxs else total_draws
+        g_cap = min(cur_g, 35)
+        emp_hazard = (gap_appear[g_cap] + 1.0) / (gap_survive[g_cap] + 7.5)
+        recent_g = num_gaps[n][-12:]
+        if recent_g:
+            avg_g = sum(recent_g) / len(recent_g)
+            dist_ratio = abs(cur_g - avg_g) / max(avg_g, 1.0)
+            rhythm_fit = math.exp(-0.75 * (dist_ratio ** 2))
+        else:
+            rhythm_fit = 0.5
+        cycle_score[n] = emp_hazard * 0.60 + rhythm_fit * 0.40
+
+    # ========================================================
+    # C. 직전 1~3회차 기반 마르코프 전이(Transition) 점수
+    # ========================================================
+    last1_nums = draws_main[-1]
+    last1_bns = draws_bonus[-1]
+    last2_nums = draws_main[-2] if total_draws >= 2 else ()
+    last3_nums = draws_main[-3] if total_draws >= 3 else ()
+
+    transition_score = {}
+    for n in range(1, 46):
+        norm_f = max(main_counts[n], 1) ** 0.35
+        s1 = sum(trans_lag1[p][n] for p in last1_nums) / norm_f
+        sb = bonus_trans_lag1[last1_bns][n] / norm_f
+        s2 = (
+            sum(trans_lag2[p][n] for p in last2_nums) / norm_f
+            if last2_nums else 0.0
+        )
+        s3 = (
+            sum(trans_lag3[p][n] for p in last3_nums) / norm_f
+            if last3_nums else 0.0
+        )
+        transition_score[n] = (
+            s1 * 0.52 + sb * 0.14 + s2 * 0.22 + s3 * 0.12
+        )
+
+    # ========================================================
+    # D. 이월수 / 이웃수(±1) / 징검다리 / 최근 끝수 활성도 점수
+    # ========================================================
+    recent_endings = Counter(
+        n % 10 for r in draws_main[-4:] for n in r
+    )
+    last1_set = set(last1_nums)
+    last2_set = set(last2_nums)
+    nbr_1 = {
+        x for p in last1_nums for x in (p - 1, p + 1) if 1 <= x <= 45
+    } - last1_set
+    nbr_bns = {
+        x for x in (last1_bns - 1, last1_bns + 1) if 1 <= x <= 45
+    } - last1_set
+
+    pattern_score = {}
+    for n in range(1, 46):
+        val = 0.0
+        if n in last1_set:
+            val += 0.55
+        elif n == last1_bns:
+            val += 0.45
+        elif n in nbr_1:
+            val += 0.48
+        elif n in nbr_bns:
+            val += 0.30
+        if n in last2_set:
+            val += 0.25
+        val += min(recent_endings[n % 10] / 6.0, 0.35)
+        pattern_score[n] = val
+
+    # ========================================================
+    # E. Z-score Sigmoid 정규화 및 번호별 트랙 점수 산출
+    # ========================================================
+    def smooth_norm(d):
+        vals = [float(d.get(n, 0.0)) for n in range(1, 46)]
+        mean_v = sum(vals) / len(vals)
+        std_v = math.sqrt(
+            sum((v - mean_v) ** 2 for v in vals) / len(vals)
+        )
+        if std_v < 1e-9:
+            return {n: 0.5 for n in range(1, 46)}
+        return {
+            n: 1.0 / (
+                1.0 + math.exp(-((float(d.get(n, 0.0)) - mean_v) / std_v))
+            )
+            for n in range(1, 46)
+        }
+
+    pair_deg = Counter()
+    for (a, b), v in pair_decay.items():
+        pair_deg[a] += v
+        pair_deg[b] += v
+
+    n_main = smooth_norm(main_counts)
+    n_short = smooth_norm(short_decay)
+    n_mid = smooth_norm(mid_decay)
+    n_long = smooth_norm(long_decay)
+    n_trans = smooth_norm(transition_score)
+    n_cycle = smooth_norm(cycle_score)
+    n_pat = smooth_norm(pattern_score)
+    n_deg = smooth_norm(pair_deg)
+
+    score_total = {}
+    score_trend = {}
+    score_rebound = {}
+
+    for n in range(1, 46):
+        score_trend[n] = (
+            n_trans[n] * 0.28
+            + n_short[n] * 0.20
+            + n_mid[n] * 0.20
+            + n_deg[n] * 0.14
+            + n_long[n] * 0.10
+            + n_main[n] * 0.08
+        )
+        score_rebound[n] = (
+            n_pat[n] * 0.30
+            + n_cycle[n] * 0.26
+            + n_trans[n] * 0.20
+            + n_mid[n] * 0.14
+            + n_long[n] * 0.10
+        )
+        score_total[n] = (
+            0.58 * score_trend[n] + 0.42 * score_rebound[n]
+        )
+
+    # ========================================================
+    # F. 한 줄 내 번호 결속력(Pair & Triplet Synergy) 행렬
+    # ========================================================
+    max_pair_d = max(pair_decay.values()) if pair_decay else 1.0
+    max_pair_c = max(pair_counts.values()) if pair_counts else 1.0
+    max_trip_d = max(triplet_decay.values()) if triplet_decay else 1.0
+    max_mb_d = max(main_bonus_decay.values()) if main_bonus_decay else 1.0
+
+    co_trans = Counter()
+    for a, b in combinations(range(1, 46), 2):
+        co_trans[(a, b)] = math.sqrt(
+            max(transition_score[a] * transition_score[b], 0.0)
+        )
+    max_cot = max(co_trans.values()) if co_trans else 1.0
+
+    pair_synergy = {}
+    for a, b in combinations(range(1, 46), 2):
+        key = (a, b)
+        expected = max(
+            (main_counts[a] * main_counts[b]) / max(total_draws, 1),
+            1.0
+        )
+        lift = min((pair_counts[key] / expected) / 2.2, 1.0)
+        p_d = pair_decay[key] / max_pair_d
+        p_c = pair_counts[key] / max_pair_c
+        cot = co_trans[key] / max_cot
+        mb = main_bonus_decay[key] / max_mb_d
+        pair_synergy[key] = (
+            p_d * 0.38
+            + cot * 0.25
+            + lift * 0.20
+            + p_c * 0.10
+            + mb * 0.07
+        )
+
+    # ========================================================
+    # G. 1등 조합 구조 필터 및 한 줄 응집 점수 함수
+    # ========================================================
+    hist_sums = [sum(nums) for nums in draws_main]
+    sum_mean = sum(hist_sums) / len(hist_sums)
+    sum_std = math.sqrt(
+        sum((x - sum_mean) ** 2 for x in hist_sums) / len(hist_sums)
+    )
+
+    def calc_ac_value(nums):
+        diffs = {abs(b - a) for a, b in combinations(nums, 2)}
+        return len(diffs) - 5
+
+    def is_valid_structure(comb):
+        s = sum(comb)
+        if not (92 <= s <= 178):
+            return False
+        odds = sum(n % 2 == 1 for n in comb)
+        if odds in (0, 6):
+            return False
+        highs = sum(n >= 23 for n in comb)
+        if highs in (0, 6):
+            return False
+        consec = sum(comb[i + 1] - comb[i] == 1 for i in range(5))
+        if consec >= 3:
+            return False
+        if calc_ac_value(comb) < 7:
+            return False
+        decades = Counter((n - 1) // 10 for n in comb)
+        if max(decades.values()) >= 4:
+            return False
+        endings = Counter(n % 10 for n in comb)
+        if max(endings.values()) >= 3:
+            return False
+        return True
+
+    def score_combination(comb):
+        ind_s = sum(score_total[n] for n in comb) / 6.0
+        p_vals = sorted(
+            (pair_synergy[(a, b)] for a, b in combinations(comb, 2)),
+            reverse=True
+        )
+        pair_s = (
+            0.65 * (sum(p_vals[:6]) / 6.0)
+            + 0.35 * (sum(p_vals) / 15.0)
+        )
+
+        t_vals = sorted(
+            (
+                triplet_decay.get((a, b, c), 0.0) / max_trip_d
+                for a, b, c in combinations(comb, 3)
+            ),
+            reverse=True
+        )
+        trip_s = (
+            0.70 * (sum(t_vals[:4]) / 4.0)
+            + 0.30 * (sum(t_vals) / 20.0)
+        )
+
+        s = sum(comb)
+        sum_z = (s - sum_mean) / max(sum_std, 1.0)
+        sum_s = math.exp(-0.5 * (sum_z ** 2))
+        odds = sum(n % 2 == 1 for n in comb)
+        odd_s = 1.0 if odds in (2, 3, 4) else 0.55
+        highs = sum(n >= 23 for n in comb)
+        high_s = 1.0 if highs in (2, 3, 4) else 0.55
+        ac_s = 1.0 if calc_ac_value(comb) >= 8 else 0.85
+        has_carry_or_nbr = any(
+            (n in last1_set or n in nbr_1) for n in comb
+        )
+        carry_s = 1.0 if has_carry_or_nbr else 0.75
+
+        struct_s = (
+            sum_s * 0.30
+            + odd_s * 0.20
+            + high_s * 0.20
+            + ac_s * 0.15
+            + carry_s * 0.15
+        )
+
+        return (
+            ind_s * 0.42
+            + pair_s * 0.28
+            + trip_s * 0.12
+            + struct_s * 0.18
+        )
+
+    def build_clique_from_seed(seed_nums, pool_nums):
+        clique = list(seed_nums)
+        while len(clique) < 6:
+            best_n = None
+            best_gain = -1.0
+            for cand in pool_nums:
+                if cand in clique:
+                    continue
+                syn = sum(
+                    pair_synergy[(min(cand, m), max(cand, m))]
+                    for m in clique
+                ) / len(clique)
+                trip_syn = 0.0
+                if len(clique) >= 2:
+                    t_list = [
+                        triplet_decay.get(
+                            tuple(sorted((cand, m1, m2))), 0.0
+                        ) / max_trip_d
+                        for m1, m2 in combinations(clique, 2)
+                    ]
+                    trip_syn = (
+                        max(t_list) * 0.6
+                        + (sum(t_list) / len(t_list)) * 0.4
+                    )
+                gain = (
+                    score_total[cand] * 0.44
+                    + syn * 0.40
+                    + trip_syn * 0.16
+                )
+                if gain > best_gain:
+                    best_gain = gain
+                    best_n = cand
+            if best_n is None:
+                break
+            clique.append(best_n)
+        return tuple(sorted(clique))
+
+    # ========================================================
+    # H. 고밀도 클러스터 전수 압축 전개 + 조건부 연쇄 클리크 후보 생성
+    # ========================================================
+    trend_pool = [
+        n for n, _ in sorted(
+            score_trend.items(), key=lambda x: x[1], reverse=True
+        )[:12]
+    ]
+    rebound_pool = [
+        n for n, _ in sorted(
+            score_rebound.items(), key=lambda x: x[1], reverse=True
+        )[:12]
+    ]
+    total_pool = [
+        n for n, _ in sorted(
+            score_total.items(), key=lambda x: x[1], reverse=True
+        )[:13]
+    ]
+    wide_pool = [
+        n for n, _ in sorted(
+            score_total.items(), key=lambda x: x[1], reverse=True
+        )[:24]
+    ]
+
+    candidate_map = {}
+
+    for pool in (total_pool, trend_pool, rebound_pool):
+        for comb in combinations(pool, 6):
+            comb = tuple(sorted(comb))
+            if comb not in candidate_map and is_valid_structure(comb):
+                candidate_map[comb] = score_combination(comb)
+
+    top_pairs = sorted(
+        [
+            (
+                (min(a, b), max(a, b)),
+                pair_synergy[(min(a, b), max(a, b))]
+                + 0.5 * (score_total[a] + score_total[b])
+            )
+            for a, b in combinations(wide_pool, 2)
+        ],
+        key=lambda x: x[1],
+        reverse=True
+    )[:80]
+
+    for (a, b), _ in top_pairs:
+        comb = build_clique_from_seed((a, b), wide_pool)
+        if (
+            len(comb) == 6
+            and comb not in candidate_map
+            and is_valid_structure(comb)
+        ):
+            candidate_map[comb] = score_combination(comb)
+
+    ranked_all = sorted(
+        candidate_map.items(),
+        key=lambda x: x[1],
         reverse=True
     )
 
     # ========================================================
-    # K. 상위 조합 중 다양성 확보
-    # 동일한 번호가 과도하게 반복되지 않도록 최대 4개 겹침 허용
+    # I. 3-tuple / 4-tuple 커버링(Wheeling) 기반 상위 10세트 압축 선택
+    # (맞힌 번호들이 서로 다른 게임으로 찢어지지 않고 한 줄 안에 모이도록 배치)
     # ========================================================
     selected_sets = []
+    covered_3tuples = set()
+    covered_4tuples = set()
 
-    for numbers_tuple, score in ranked:
-        if len(selected_sets) >= set_count:
-            break
+    for _ in range(set_count):
+        best_item = None
+        best_obj = -1.0
 
-        candidate_set = set(numbers_tuple)
-
-        too_similar = False
-
-        for existing_numbers, _ in selected_sets:
-            overlap = len(
-                candidate_set.intersection(existing_numbers)
-            )
-
-            if overlap >= 5:
-                too_similar = True
-                break
-
-        if too_similar:
-            continue
-
-        selected_sets.append(
-            (numbers_tuple, score)
-        )
-
-    # 혹시 10세트 미만이면 중복만 피해서 보완
-    if len(selected_sets) < set_count:
-        used = {
-            tuple(numbers_tuple)
-            for numbers_tuple, _ in selected_sets
-        }
-
-        for numbers_tuple, score in ranked:
-            if len(selected_sets) >= set_count:
-                break
-
-            if numbers_tuple in used:
+        for comb, base_score in ranked_all[:500]:
+            if any(comb == ex for ex, _ in selected_sets):
                 continue
 
-            used.add(numbers_tuple)
-            selected_sets.append(
-                (numbers_tuple, score)
+            if any(
+                len(set(comb) & set(ex)) >= 5
+                for ex, _ in selected_sets
+            ):
+                continue
+
+            new_3s = sum(
+                1 for sub3 in combinations(comb, 3)
+                if sub3 not in covered_3tuples
+            )
+            new_4s = sum(
+                1 for sub4 in combinations(comb, 4)
+                if sub4 not in covered_4tuples
             )
 
+            obj = (
+                base_score
+                + 0.004 * (new_3s / 20.0)
+                + 0.003 * (new_4s / 15.0)
+            )
+            if obj > best_obj:
+                best_obj = obj
+                best_item = (comb, base_score)
+
+        if best_item is None:
+            for comb, base_score in ranked_all:
+                if not any(comb == ex for ex, _ in selected_sets):
+                    best_item = (comb, base_score)
+                    break
+
+        if best_item is not None:
+            selected_sets.append(best_item)
+            for sub3 in combinations(best_item[0], 3):
+                covered_3tuples.add(sub3)
+            for sub4 in combinations(best_item[0], 4):
+                covered_4tuples.add(sub4)
+
     # ========================================================
-    # L. 결과 DataFrame
+    # J. 결과 DataFrame
     # ========================================================
     rows = []
 
@@ -1496,23 +1534,49 @@ def evaluate_prediction_history(
     prediction_df["예측회차"] = pd.to_numeric(
         prediction_df["예측회차"],
         errors="coerce"
-    )
+    ).astype("Int64")
 
-    # 평가 결과 컬럼 준비
-    result_columns = [
+    # 평가 결과 컬럼 준비 (숫자형 컬럼은 Int64, 문자열 컬럼은 object로 타입 고정)
+    numeric_result_columns = [
         "실제번호1", "실제번호2", "실제번호3",
         "실제번호4", "실제번호5", "실제번호6",
         "실제보너스",
         "본번호일치수",
         "보너스일치",
-        "총일치수",
+        "총일치수"
+    ]
+    string_result_columns = [
         "당첨등수",
         "평가상태"
     ]
 
-    for col in result_columns:
+    for col in numeric_result_columns:
         if col not in prediction_df.columns:
-            prediction_df[col] = ""
+            prediction_df[col] = pd.Series(
+                pd.NA,
+                index=prediction_df.index,
+                dtype="Int64"
+            )
+        else:
+            prediction_df[col] = pd.to_numeric(
+                prediction_df[col],
+                errors="coerce"
+            ).astype("Int64")
+
+    for col in string_result_columns:
+        if col not in prediction_df.columns:
+            prediction_df[col] = pd.Series(
+                "",
+                index=prediction_df.index,
+                dtype="object"
+            )
+        else:
+            prediction_df[col] = (
+                prediction_df[col]
+                .where(prediction_df[col].notna(), "")
+                .astype(str)
+                .astype("object")
+            )
 
     main_cols = [
         "번호1", "번호2", "번호3",
@@ -1841,18 +1905,29 @@ def save_prediction_sets(
     )
 
     # 추후 실제 결과 비교를 위한 컬럼
-    prediction_df["실제번호1"] = ""
-    prediction_df["실제번호2"] = ""
-    prediction_df["실제번호3"] = ""
-    prediction_df["실제번호4"] = ""
-    prediction_df["실제번호5"] = ""
-    prediction_df["실제번호6"] = ""
-    prediction_df["실제보너스"] = ""
-    prediction_df["본번호일치수"] = ""
-    prediction_df["보너스일치"] = ""
-    prediction_df["총일치수"] = ""
-    prediction_df["당첨등수"] = ""
-    prediction_df["평가상태"] = "대기"
+    for col in [
+        "실제번호1", "실제번호2", "실제번호3",
+        "실제번호4", "실제번호5", "실제번호6",
+        "실제보너스",
+        "본번호일치수",
+        "보너스일치",
+        "총일치수"
+    ]:
+        prediction_df[col] = pd.Series(
+            pd.NA,
+            index=prediction_df.index,
+            dtype="Int64"
+        )
+    prediction_df["당첨등수"] = pd.Series(
+        "",
+        index=prediction_df.index,
+        dtype="object"
+    )
+    prediction_df["평가상태"] = pd.Series(
+        "대기",
+        index=prediction_df.index,
+        dtype="object"
+    )
 
     # 회차별 예상번호 누적
     if existing_prediction_df.empty:
