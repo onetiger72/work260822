@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from lotto_validation import final_review, print_review
 from lotto_storage import load_history, load_predictions
+from lotto_weekly import PredictionWindowError, verify_prediction_window
 
 
 def main():
@@ -22,11 +23,15 @@ def main():
     # 후보를 추측해 복원하지 않는다. 손상된 입력이면 검토 API 호출 전에 중단한다.
     history = load_history(app.CSV_FILE)
     predictions = load_predictions(app.PREDICTION_FILE)
-    target = int(history["회차"].max()) + 1
+    try:
+        target = verify_prediction_window(int(history["회차"].max()) + 1)
+    except PredictionWindowError as error:
+        parser.error(str(error))
     fetch_draw = (lambda _: None) if args.offline else app.get_lotto_draw
     proposal = json.load(sys.stdin) if args.manual_response else None
     result = final_review(history, predictions[predictions["예측회차"] == target],
-                          predictions, fetch_draw, manual_review=proposal)
+                          predictions, fetch_draw, manual_review=proposal,
+                          mode="manual" if args.offline or args.manual_response else None)
     print_review(result)
     if "payload" in result:
         print("official_status:", result["payload"]["official_status"])

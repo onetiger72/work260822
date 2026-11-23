@@ -13,9 +13,12 @@ import os
 import json
 
 from lotto_validation import strict_int, validate_draw, validate_history, final_review, print_review
-from lotto_storage import load_history, load_predictions, validate_prediction_history
+from lotto_storage import (PREDICTION_COLUMNS, csv_sha256, load_history, load_predictions,
+                           prediction_evaluation, prize_name as _lotto_prize_name,
+                           validate_prediction_history, write_csv_atomic)
 
-from lotto_weekly import latest_completed_draw, verify_latest_result
+from lotto_weekly import latest_completed_draw, verify_latest_result, verify_prediction_window
+from lotto_selection import describe_batch, generator_source_hashes, select_weekly_portfolio
 
 from lotto_portfolio import (combination_hit_diagnostics,
                              generate_prediction_sets as generate_main_hit_portfolio)
@@ -297,6 +300,9 @@ def collect_all_lotto(query_round, start_draw=1, sleep_time=0.10):
         print(f"{query_round}회까지 수집할 누락 회차가 없습니다.")
         return existing
 
+    if not existing.empty:
+        verify_latest_result(existing, get_lotto_draw)
+    original_sha256 = existing.attrs.get("source_sha256")
     new_rows = []
     for position, target in enumerate(targets, 1):
         result = get_lotto_draw(target)
@@ -314,7 +320,7 @@ def collect_all_lotto(query_round, start_draw=1, sleep_time=0.10):
     combined = incoming if existing.empty else pd.concat([existing, incoming], ignore_index=True)
     combined = combined.sort_values("회차").reset_index(drop=True)
     validate_history(combined)  # 누락·중복을 감춘 채 덮어쓰지 않는 최종 저장 경계
-    combined.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+    write_csv_atomic(combined, CSV_FILE, expected_sha256=original_sha256)
     print(f"당첨 이력 저장 완료: {len(new_rows)}개 추가, 총 {len(combined)}회")
     return combined
 
@@ -644,13 +650,7 @@ def calculate_missing_draws(df):
         result
     )
 
-PREDICTION_FILE_COLUMNS = (
-    ["예측회차", "세트"]
-    + NUMBER_COLUMNS
-    + ["종합점수"]
-    + [f"실제번호{index}" for index in range(1, 7)]
-    + ["본번호일치수", "보너스일치", "총일치수"]
-)
+PREDICTION_FILE_COLUMNS = PREDICTION_COLUMNS
 
 PREDICTION_FEEDBACK_COLUMNS = [
     "평가회차",
@@ -1590,26 +1590,6 @@ def generate_prediction_sets(
         random_seed=random_seed, target_draw=target_draw
     )
 
-def _lotto_prize_name(main_hit_count, bonus_hit):
-    if main_hit_count == 6:
-        return "1등"
-    if main_hit_count == 5 and bonus_hit:
-        return "2등"
-    if main_hit_count == 5:
-        return "3등"
-    if main_hit_count == 4:
-        return "4등"
-    if main_hit_count == 3:
-        return "5등"
-
-    return "낙첨"
-
-
-
-
-
-
-
 def load_prediction_history(latest_history_round=None, filename=PREDICTION_FILE):
     """회차와 번호를 추측하지 않고 기존 예측을 엄격하게 읽는다.
 
@@ -1634,61 +1614,26 @@ def evaluate_prediction_history(prediction_df, history_df):
         return prediction_df, set()
 
     evaluated_df = prediction_df.copy()
-    actual_draws = {}
-
-    for _, row in history_df.iterrows():
-        draw_number = int(row["회차"])
-        actual_draws[draw_number] = {
-            "numbers": sorted(
-                int(row[column])
-                for column in NUMBER_COLUMNS
-            ),
-            "bonus": int(row["보너스"])
-        }
-
-    actual_number_columns = [
-        f"실제번호{index}"
-        for index in range(1, 7)
-    ]
+    actual_draws = {row["회차"]: row for row in validate_history(history_df)}
     newly_evaluated_draws = set()
 
     for index, row in evaluated_df.iterrows():
         target_draw = int(row["예측회차"])
 
         if target_draw not in actual_draws:
+            if pd.isna(row["평가상태"]) or row["평가상태"] == "":
+                evaluated_df.at[index, "평가상태"] = "대기"
             continue
-
-        was_evaluated = all(
-            pd.notna(row[column])
-            for column in actual_number_columns
+        actual = actual_draws[target_draw]
+        evaluation = prediction_evaluation(
+            row[NUMBER_COLUMNS], [actual[column] for column in NUMBER_COLUMNS], actual["보너스"]
         )
-        actual_numbers = actual_draws[target_draw]["numbers"]
-        actual_number_set = set(actual_numbers)
-        predicted_numbers = {
-            int(row[column])
-            for column in NUMBER_COLUMNS
-        }
-        main_hit_count = len(predicted_numbers & actual_number_set)
-        bonus_hit = int(
-            actual_draws[target_draw]["bonus"] in predicted_numbers
-        )
-
-        for column, number in zip(
-            actual_number_columns,
-            actual_numbers
-        ):
-            evaluated_df.at[index, column] = number
-
-        evaluated_df.at[index, "본번호일치수"] = main_hit_count
-        evaluated_df.at[index, "보너스일치"] = bonus_hit
-        evaluated_df.at[index, "총일치수"] = (
-            main_hit_count + bonus_hit
-        )
-
-        if not was_evaluated:
+        if pd.isna(row["실제번호1"]):
             newly_evaluated_draws.add(target_draw)
+        for column, value in evaluation.items():
+            evaluated_df.at[index, column] = value
 
-    return evaluated_df[PREDICTION_FILE_COLUMNS], newly_evaluated_draws
+    return evaluated_df, newly_evaluated_draws
 
 def _print_new_evaluation_summary(
         prediction_df,
@@ -1761,80 +1706,78 @@ def _print_new_evaluation_summary(
             f"{sum(prize != '낙첨' for prize in prize_names)}개"
         )
 
-def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None):
-    """입력·공식 결과 확인 후 기존 예측을 재평가하고 없는 다음 회차만 추가한다.
-
-    CSV를 읽을 수 없으면 새 이력으로 덮어쓰지 않는다. 다음 회차 후보가 이미
-    있으면 같은 번호로 재검토한다. 최종 검토의 거부/입력 오류는 저장을 막는다.
-    검토 대기 후보 저장은 기존 정책이며, 파일 존재를 최종 확정으로 해석하지
-    않는다. 검토 상태는 반환 DataFrame.attrs와 화면에만 남긴다.
-    """
-    validate_history(df)
-    latest_round = int(df["회차"].max())
-    target_draw = latest_round + 1
-    # 파일 손상을 먼저 확인한다. 실패하면 생성·공식 재조회·저장을 진행하지 않는다.
-    prediction_history = load_prediction_history(latest_history_round=latest_round, filename=filename)
-    verify_latest_result(df, get_lotto_draw, expected_round=latest_completed_draw())
-    prediction_history, newly_evaluated_draws = evaluate_prediction_history(prediction_history, df)
-    prediction_feedback, _ = calculate_prediction_feedback(prediction_history)
-    current_prediction = prediction_history[prediction_history["예측회차"] == target_draw].copy()
-    generated_now = current_prediction.empty
-    weekly_report = None
-
-    if generated_now:
-        generated = generate_prediction_sets(df, set_count=PREDICTION_SET_COUNT, target_draw=target_draw)
-        weekly_report = generated.attrs["weekly_review"]
-        previous = prediction_history[prediction_history["예측회차"] == latest_round]
-        weekly_report["previous_prediction_evaluation"] = {
-            "draw": latest_round, "available": not previous.empty, "sets": len(previous),
-            "main_hits": pd.to_numeric(previous["본번호일치수"], errors="coerce").dropna().astype(int).tolist(),
-            "limits": "저장 시점이 확인되지 않는 기록은 사전 예측 성과를 입증하지 않습니다.",
-        }
-        if not previous.empty:
-            weekly_report["previous_prediction_evaluation"].update(combination_hit_diagnostics(
-                previous[NUMBER_COLUMNS].to_numpy(),
-                df.loc[df["회차"] == latest_round, NUMBER_COLUMNS].iloc[0].tolist(),
-            ))
-        current_prediction = generated[["세트"] + NUMBER_COLUMNS].copy()
-        current_prediction["예측회차"] = target_draw
-        current_prediction["종합점수"] = generated["조합점수"].round(6)
-        for column in [f"실제번호{i}" for i in range(1, 7)] + ["본번호일치수", "보너스일치", "총일치수"]:
-            current_prediction[column] = pd.NA
-        current_prediction = current_prediction[PREDICTION_FILE_COLUMNS]
-        prediction_history = pd.concat([prediction_history, current_prediction], ignore_index=True)
-        print("주간 분석 검토:")
-        print(json.dumps(weekly_report, ensure_ascii=False, indent=2))
-
-    final_audit = final_review(df, current_prediction, prediction_history, get_lotto_draw,
-                               expected_count=PREDICTION_SET_COUNT, manual_review=manual_review)
-    print_review(final_audit)
-    if final_audit["status"] in {"validation_error", "source_mismatch", "reject"}:
-        raise ValueError(f"최종 번호 검증 실패: {final_audit['status']}")
-    if not final_audit["finalized"]:
-        print("아래 번호는 검증 대기 후보이며 GPT 최종 확정 번호가 아닙니다.")
-
-    prediction_history = prediction_history.sort_values(["예측회차", "세트"]).reset_index(drop=True)
-    # 새 후보와 갱신된 과거 평가 전체를 다시 검사한 뒤 허용된 예상번호 CSV만 저장한다.
-    prediction_history = validate_prediction_history(prediction_history)
-    prediction_history[PREDICTION_FILE_COLUMNS].to_csv(filename, index=False, encoding="utf-8-sig")
-    _print_new_evaluation_summary(prediction_history, newly_evaluated_draws, df)
-    print(f"{target_draw}회 당첨 예상번호 {len(current_prediction)}세트")
-    print(current_prediction[["예측회차", "세트"] + NUMBER_COLUMNS + ["종합점수"]].to_string(index=False))
-    if not generated_now:
-        print("이미 저장된 예측이 있어 새 세트를 중복 생성하지 않았습니다.")
+def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None, *,
+                         interactive=False, now=None, history_path=None):
+    """두 생성기를 비교한 뒤 같은 후보의 검토가 통과한 경우에만 예측 파일을 저장한다."""
+    validated_history = validate_history(df)
+    latest = validated_history[-1]["회차"]
+    target = latest + 1
+    predictions = load_prediction_history(filename=filename)
+    original_digest = predictions.attrs.get("source_sha256")
+    review_history = df
+    if history_path is not None:
+        review_history = load_history(history_path)
+        if validate_history(review_history) != validated_history:
+            raise ValueError("후보 준비 중 당첨 이력이 변경되었습니다. 다시 검토하세요.")
+    verify_prediction_window(target, now)
+    verify_latest_result(df, get_lotto_draw, expected_round=latest_completed_draw(now))
+    if (predictions["예측회차"] > target).any():
+        raise ValueError("예측 이력에 검토 대상보다 뒤의 회차가 있습니다.")
+    evaluated, new_evaluations = evaluate_prediction_history(predictions, df)
+    existing = evaluated[evaluated["예측회차"] == target].copy()
+    generated, evidence = select_weekly_portfolio(df, generate_prediction_sets, PREDICTION_SET_COUNT)
+    if existing.empty:
+        current = generated[["세트"] + NUMBER_COLUMNS + ["종합점수"]].copy()
+        current["예측회차"] = target
+        current["종합점수"] = current["종합점수"].round(6)
+        current["평가상태"] = "대기"
+        current = validate_prediction_history(current.reindex(columns=evaluated.columns))
     else:
-        print("기법별 사전 검증·반영 강도 검증 후 6개 전체 조합을 평가해 생성했습니다.")
-    print("종합점수는 모델의 본번호 포함 추정치 합이며 1등 당첨확률이 아닙니다.")
-    print(f"기존 예측 평가: {prediction_feedback['evaluated_draws']}회, "
-          f"평균 본번호 적중 {prediction_feedback['mean_main_hits']:.3f}개")
-    print(f"회차별 한 세트 최고 적중 평균 {prediction_feedback['mean_best_main_hits']:.3f}개, "
-          f"6개가 흩어진 회차 {prediction_feedback['all_six_scattered_draws']}회, "
-          f"한 세트 6개 적중 회차 {prediction_feedback['exact_six_draws']}회")
-    print(f"회차별 예상번호/평가 이력 저장 완료: {filename}")
-    current_prediction.attrs["weekly_review"] = weekly_report
-    current_prediction.attrs["final_review"] = final_audit
-    current_prediction.attrs["prediction_feedback"] = prediction_feedback
-    return current_prediction
+        current = existing
+        saved_tickets = current[NUMBER_COLUMNS].to_numpy().tolist()
+        if saved_tickets != evidence["compared"][evidence["selected"]]["tickets"]:
+            evidence["preferred_generator"] = evidence["selected"]
+            evidence["selected"] = "already_saved"
+            evidence["compared"]["already_saved"] = describe_batch(current, PREDICTION_SET_COUNT)
+
+    def review(proposal):
+        return final_review(review_history, current, predictions, get_lotto_draw,
+                            expected_count=PREDICTION_SET_COUNT, manual_review=proposal,
+                            selection_evidence=evidence, now=now,
+                            mode="manual" if interactive or proposal is not None else None)
+
+    result = review(manual_review)
+    if interactive and result["status"] == "manual_review_pending":
+        print_review(result)
+        print("위 후보를 직접 검토한 응답 JSON 한 줄을 입력하세요.", flush=True)
+        result = review(json.loads(sys.stdin.readline()))
+    print_review(result)
+    current.attrs["final_review"] = result
+    current.attrs["weekly_review"] = generated.attrs.get("weekly_review")
+    current.attrs["selection_evidence"] = evidence
+    if result["status"] in {"reject", "validation_error", "source_mismatch"}:
+        raise ValueError(f"최종 검토 실패: {result.get('error', result['status'])}")
+    if not result["finalized"]:
+        print("검토 대기 중입니다. 후보는 예상번호 CSV에 저장하지 않았습니다.")
+        return current
+
+    combined = pd.concat([evaluated, current], ignore_index=True) if existing.empty else evaluated
+    combined = validate_prediction_history(combined)
+    def verify_before_replace():
+        if history_path is not None and csv_sha256(history_path) != review_history.attrs["source_sha256"]:
+            raise ValueError("검토 중 당첨 이력 파일이 변경되었습니다.")
+        if generator_source_hashes() != evidence["source_sha256"]:
+            raise ValueError("검토 중 생성 코드가 변경되었습니다.")
+        verify_prediction_window(target, now)
+
+    write_csv_atomic(combined, filename, expected_sha256=original_digest,
+                     before_replace=verify_before_replace)
+    _print_new_evaluation_summary(combined, new_evaluations, df)
+    print(f"{target}회 검토 통과 · {len(current)}세트 저장 · SHA256 {result['input_sha256']}")
+    print(current[["세트"] + NUMBER_COLUMNS].to_string(index=False))
+    current.attrs["prediction_feedback"] = calculate_prediction_feedback(combined)[0]
+    return current
+
 
 def print_summary(
         df,
@@ -1940,31 +1883,25 @@ def print_summary(
     )
 
 def main():
-    """점검은 읽기 전용으로 분기하고, 일반 실행은 두 CSV 사전 검증부터 시작한다."""
+    """기본 실행은 수동 검토 요청을 출력하고 --review-session은 같은 실행에서 응답을 받는다."""
+    import argparse
 
-    if "--audit-only" in sys.argv:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("round", type=int, nargs="?")
+    parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument("--offline", action="store_true")
+    response = parser.add_mutually_exclusive_group()
+    response.add_argument("--manual-response", action="store_true")
+    response.add_argument("--review-session", action="store_true")
+    args = parser.parse_args()
+    if args.audit_only:
         from audit_predictions import audit
-        audit(sys.modules[__name__], offline="--offline" in sys.argv)
-        return
-
-    # --------------------------------------------------------
-    # STEP 1
-    # 데이터 수집
-    # --------------------------------------------------------
-
-    query_round = QUERY_ROUND
-    if query_round <= 0:
-        query_round = latest_completed_draw()
-
-    arguments = [arg for arg in sys.argv[1:] if arg != "--manual-response"]
-    if arguments:
-        try:
-            query_round = int(arguments[0])
-        except ValueError:
-            print(
-                f"[실행 인수 오류] 회차는 정수여야 합니다 : {arguments[0]}"
-            )
-            return
+        return audit(sys.modules[__name__], offline=args.offline)
+    if args.offline:
+        parser.error("--offline은 --audit-only와 함께 사용하세요.")
+    query_round = latest_completed_draw()
+    if args.round is not None and args.round != query_round:
+        parser.error(f"새 후보는 최신 완료 회차 {query_round}회까지만 사용합니다.")
 
     # 예측 CSV가 손상됐는데 당첨 CSV만 먼저 갱신하는 상황도 방지한다.
     # 두 파일의 형식 문제는 수집/생성에 들어가기 전에 드러나야 한다.
@@ -2028,12 +1965,18 @@ def main():
     # 기존 예측 평가 + 다음 회차 예상번호 생성 및 누적 저장
     # --------------------------------------------------------
 
-    proposal = json.load(sys.stdin) if "--manual-response" in sys.argv else None
+    proposal = json.load(sys.stdin) if args.manual_response else None
     prediction_df = save_prediction_sets(
-        df, filename=PREDICTION_FILE, manual_review=proposal
+        df, filename=PREDICTION_FILE, manual_review=proposal, interactive=args.review_session,
+        history_path=CSV_FILE,
     )
 
     # --------------------------------------------------------
+    if not prediction_df.attrs["final_review"]["finalized"]:
+        if args.manual_response or args.review_session:
+            raise SystemExit("최종 검토가 통과하지 않아 예측 파일을 저장하지 않았습니다.")
+        return prediction_df
+
     # STEP 7
     # 화면 출력
     # --------------------------------------------------------

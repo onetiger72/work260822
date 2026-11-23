@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from lotto_portfolio import VERSION
+from lotto_selection import select_weekly_portfolio
 from lotto_validation import final_review, print_review
-from lotto_weekly import latest_completed_draw, verify_latest_result
+from lotto_weekly import latest_completed_draw, verify_latest_result, verify_prediction_window
 from lotto_storage import load_history, load_predictions
 
 
@@ -35,25 +35,31 @@ def main():
     verify_latest_result(history, app.get_lotto_draw, latest_completed_draw())
     if args.target != int(history["회차"].max()) + 1:
         raise ValueError("only the next unobserved round may be regenerated")
+    verify_prediction_window(args.target)
     original_bytes = Path(app.PREDICTION_FILE).read_bytes()
-    generated = app.generate_prediction_sets(history, target_draw=args.target)
+    generated, evidence = select_weekly_portfolio(history, app.generate_prediction_sets,
+                                                 set_count=app.PREDICTION_SET_COUNT)
     rows = []
     for row in generated.to_dict("records"):
         candidate = {column: "" for column in app.PREDICTION_FILE_COLUMNS}
         candidate.update({column: int(row[column]) for column in ["세트"] + app.NUMBER_COLUMNS})
-        candidate.update({"예측회차": args.target, "종합점수": float(row["조합점수"])})
+        candidate.update({"예측회차": args.target, "종합점수": float(row["종합점수"])})
         rows.append(candidate)
-    prepared = {"target_draw": args.target, "version": VERSION,
+    screened = evidence["selected"] == "screened"
+    model_file = "lotto_portfolio.py" if screened else "lotto.py"
+    prepared = {"target_draw": args.target, "version": evidence["screened_version"] if screened else "cluster",
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "original_csv_sha256": hashlib.sha256(original_bytes).hexdigest(),
                 "history_sha256": hashlib.sha256(Path(app.CSV_FILE).read_bytes()).hexdigest(),
-                "model_sha256": hashlib.sha256((base / "lotto_portfolio.py").read_bytes()).hexdigest(),
+                "model_sha256": evidence["source_sha256"][model_file],
                 "columns": app.PREDICTION_FILE_COLUMNS, "rows": rows,
-                "weekly_review": generated.attrs["weekly_review"],
-                "score_semantics": "model-estimated main hits per ticket, not a jackpot probability"}
+                "weekly_review": generated.attrs.get("weekly_review"),
+                "selection_evidence": evidence,
+                "score_semantics": "model-estimated main hits per ticket" if screened else "cluster heuristic score"}
     proposal = json.load(sys.stdin) if args.manual_response else None
     result = final_review(history, pd.DataFrame(rows), predictions, app.get_lotto_draw,
-                          manual_review=proposal)
+                          expected_count=app.PREDICTION_SET_COUNT, manual_review=proposal,
+                          selection_evidence=evidence, mode="manual" if args.manual_response else None)
     print(json.dumps(prepared, ensure_ascii=False, indent=2))
     print_review(result)
     print(generated.to_string(index=False))

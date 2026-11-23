@@ -5,8 +5,11 @@ import io
 import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 import numpy as np
@@ -14,7 +17,8 @@ import pandas as pd
 
 from lotto_portfolio import select_portfolio
 from lotto_validation import final_review
-from lotto_storage import CsvDataError, load_history, load_predictions
+from lotto_storage import (ACTUAL_COLUMNS, PREDICTION_COLUMNS, CsvDataError, csv_sha256,
+                           load_history, load_predictions, write_csv_atomic)
 from test_lotto_audit import dated_history
 
 BASE = Path(__file__).resolve().parent
@@ -60,7 +64,9 @@ class StorageTests(unittest.TestCase):
         history = dated_history(3)
         bad_date = history.iloc[1].to_dict()
         bad_date["날짜"] = "20020101"
-        cases = [[history.iloc[1].to_dict(), None], [history.iloc[0].to_dict()], [bad_date]]
+        original = history.iloc[0].to_dict()
+        cases = [[original, history.iloc[1].to_dict(), None], [original, original],
+                 [original, bad_date], [history.iloc[1].to_dict()]]
         for responses in cases:
             with self.subTest(responses=responses), tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / "history.csv"
@@ -82,10 +88,82 @@ class StorageTests(unittest.TestCase):
             with patch.object(app, "CSV_FILE", str(path)), \
                     patch.object(app, "get_lotto_draw", side_effect=lambda n: history.iloc[n - 1].to_dict()) as fetch:
                 result = app.collect_all_lotto(query_round=3, sleep_time=0)
-            self.assertEqual([call.args[0] for call in fetch.call_args_list], [2, 3])
+            self.assertEqual([call.args[0] for call in fetch.call_args_list], [1, 2, 3])
             self.assertEqual(result["회차"].tolist(), [1, 2, 3])
             pd.testing.assert_frame_equal(load_history(path)[app.NUMBER_COLUMNS], history[app.NUMBER_COLUMNS])
             self.assertEqual({p.name for p in Path(folder).iterdir()}, {"history.csv"})
+
+    def test_rescoring_preserves_extra_columns_and_accepts_both_schemas(self):
+        app = load_app()
+        actual = dated_history(1)
+        for column, value in zip(app.NUMBER_COLUMNS, range(1, 7)):
+            actual.at[0, column] = value
+        actual.at[0, "보너스"] = 7
+        for legacy in (True, False):
+            columns = [c for c in PREDICTION_COLUMNS if
+                       not legacy or c not in {"실제보너스", "당첨등수", "평가상태"}]
+            columns.insert(2, "사용자메모")
+            row = dict.fromkeys(columns, "")
+            row.update({"예측회차": 1, "세트": 1, "사용자메모": "001, 원문",
+                        **dict(zip(app.NUMBER_COLUMNS, [1, 2, 3, 4, 5, 7]))})
+            if not legacy:
+                row.update({"당첨등수": "낙첨", "평가상태": "대기", "실제보너스": 8})
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "predictions.csv"
+                pd.DataFrame([row], columns=columns).to_csv(path, index=False)
+                loaded = load_predictions(path)
+                evaluated, new = app.evaluate_prediction_history(loaded, actual)
+                write_csv_atomic(evaluated, path, expected_sha256=loaded.attrs["source_sha256"])
+                after = load_predictions(path)
+                self.assertEqual(list(after.columns)[:len(columns)], columns)
+                self.assertEqual(after.at[0, "사용자메모"], "001, 원문")
+                self.assertEqual(new, {1})
+                self.assertEqual(after.loc[0, ACTUAL_COLUMNS].tolist(), list(range(1, 7)))
+                self.assertEqual(after.loc[0, ["실제보너스", "본번호일치수", "보너스일치",
+                                               "총일치수", "당첨등수", "평가상태"]].tolist(),
+                                 [7, 5, 1, 6, "2등", "평가완료"])
+
+    def test_atomic_csv_saves_one_revision_and_cleans_failed_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "history.csv"
+            path.write_bytes(b"original\n")
+            previous = csv_sha256(path)
+            with patch("lotto_storage.os.replace", side_effect=OSError("write interrupted")):
+                with self.assertRaises(CsvDataError):
+                    write_csv_atomic(pd.DataFrame({"a": [1]}), path, expected_sha256=previous)
+            self.assertEqual(path.read_bytes(), b"original\n")
+            barrier = Barrier(2)
+
+            def writer(number):
+                barrier.wait()
+                try:
+                    write_csv_atomic(pd.DataFrame({"a": [number]}), path, expected_sha256=previous)
+                    return True
+                except CsvDataError:
+                    return False
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                self.assertEqual(sorted(pool.map(writer, [1, 2])), [False, True])
+            self.assertIn(pd.read_csv(path).at[0, "a"], [1, 2])
+            self.assertEqual(list(Path(folder).iterdir()), [path])
+
+    def test_last_moment_guard_aborts_replace_on_valid_original_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "predictions.csv"
+            path.write_bytes(b"original\n")
+            table = pd.DataFrame({"a": [1]})
+            guard = unittest.mock.Mock(side_effect=ValueError("past cutoff"))
+            with patch("lotto_storage.os.replace") as replace:
+                with self.assertRaises(CsvDataError):
+                    write_csv_atomic(table, path, expected_sha256="old", before_replace=guard)
+                guard.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "past cutoff"):
+                    write_csv_atomic(table, path, expected_sha256=csv_sha256(path),
+                                     before_replace=guard)
+                guard.assert_called_once_with()
+                replace.assert_not_called()
+            self.assertEqual(path.read_bytes(), b"original\n")
+            self.assertEqual(list(Path(folder).iterdir()), [path])
 
     def test_bad_prediction_identity_is_never_guessed_truncated_or_deleted(self):
         app = load_app()
@@ -125,7 +203,7 @@ class StorageTests(unittest.TestCase):
         app = load_app()
         history = dated_history(3)
         generated = select_portfolio(np.full(45, 6 / 45), seed=44)
-        generated.attrs["weekly_review"] = {"selected_strength": 0.0, "effective_methods": []}
+        before_draw = datetime(2002, 12, 27, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             history_path = root / "과거로또 당첨번호.csv"
@@ -142,18 +220,30 @@ class StorageTests(unittest.TestCase):
             with patch.dict(os.environ, {"LOTTO_FINAL_REVIEW_MODE": "manual"}), \
                     patch.object(app, "latest_completed_draw", return_value=3), \
                     patch.object(app, "get_lotto_draw", return_value=history.iloc[-1].to_dict()), \
-                    patch.object(app, "generate_prediction_sets", return_value=generated) as generate, \
+                    patch.object(app, "generate_prediction_sets", wraps=app.generate_prediction_sets) as generate, \
                     redirect_stdout(io.StringIO()):
-                result = app.save_prediction_sets(history, filename=str(prediction_path))
+                before = prediction_path.read_bytes()
+                result = app.save_prediction_sets(history, filename=str(prediction_path), now=before_draw)
                 generate.assert_called_once()
+                self.assertEqual(prediction_path.read_bytes(), before)
                 self.assertEqual(result.attrs["final_review"]["status"], "manual_review_pending")
                 request = result.attrs["final_review"]["request"]
                 proposal = {"input_sha256": request["input_sha256"], "target_draw": 4,
                             "verdict": "pass", "reason": "Checked supplied batch", "checked_set_ids": list(range(1, 11))}
                 generate.reset_mock()
-                second = app.save_prediction_sets(history, filename=str(prediction_path), manual_review=proposal)
-                generate.assert_not_called()
+                second = app.save_prediction_sets(history, filename=str(prediction_path),
+                                                  manual_review=proposal, now=before_draw)
+                generate.assert_called_once()
                 self.assertTrue(second.attrs["final_review"]["finalized"])
+                confirmed = prediction_path.read_bytes()
+                repeated = app.save_prediction_sets(history, filename=str(prediction_path),
+                                                     manual_review=proposal, now=before_draw)
+                self.assertEqual(repeated.attrs["final_review"]["status"], "manual_review_pending_stale_proposal")
+                proposal["input_sha256"] = repeated.attrs["final_review"]["input_sha256"]
+                reviewed = app.save_prediction_sets(history, filename=str(prediction_path),
+                                                     manual_review=proposal, now=before_draw)
+                self.assertTrue(reviewed.attrs["final_review"]["finalized"])
+                self.assertEqual(prediction_path.read_bytes(), confirmed)
             saved = pd.read_csv(prediction_path)
             self.assertEqual(len(saved), 20)
             self.assertEqual(list(saved.columns), app.PREDICTION_FILE_COLUMNS)
@@ -183,12 +273,13 @@ class StorageTests(unittest.TestCase):
                 patch("builtins.open", side_effect=AssertionError("no filesystem I/O")), \
                 patch.object(Path, "open", side_effect=AssertionError("no pathlib I/O")):
             result = final_review(history, pd.DataFrame([candidate]), pd.DataFrame(),
-                                  lambda _: history.iloc[0].to_dict(), expected_count=1)
+                                  lambda _: history.iloc[0].to_dict(), expected_count=1,
+                                  now=datetime(2002, 12, 12, tzinfo=timezone.utc))
         self.assertEqual(result["status"], "manual_review_pending")
         self.assertIn("request", result)
 
     def test_all_python_sources_compile_and_only_core_modules_write_csv(self):
-        allowed_writers = {"로또 당첨번호 예측.py", "lotto.py", "lotto_engine.py"}
+        allowed_writers = {"lotto_storage.py", "로또 당첨번호 예측.py", "lotto.py", "lotto_engine.py"}
         paths = list(BASE.glob("*.py")) + list((BASE / "analysis_cache").glob("*.py"))
         for path in paths:
             source = path.read_text(encoding="utf-8-sig")

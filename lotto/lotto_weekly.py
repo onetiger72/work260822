@@ -1,20 +1,40 @@
 """Verify the latest completed draw before generating a weekly batch."""
 from datetime import datetime, timedelta, timezone
+from numbers import Integral
 
-from lotto_validation import validate_draw, validate_history
+KOREA = timezone(timedelta(hours=9))
+FIRST_RESULT_CHECK = datetime(2002, 12, 7, 21, tzinfo=KOREA)
+
+
+def _korean_time(now):
+    return datetime.now(KOREA) if now is None else now.astimezone(KOREA)
 
 
 def latest_completed_draw(now=None):
     """한국 시간 토요일 21시 기준 조회 대상 회차를 계산한다. 공개 성공 판정은 아니다."""
-    korea = timezone(timedelta(hours=9))
-    now = datetime.now(korea) if now is None else now.astimezone(korea)
-    # 추첨 뒤 공개 여유 시간을 둔 조회 기준이다. 실제 발표 여부는 공식 응답으로 확인한다.
-    first = datetime(2002, 12, 7, 21, 0, tzinfo=korea)
-    return max(0, int((now - first).total_seconds() // (7 * 86400)) + 1)
+    return max(0, (_korean_time(now) - FIRST_RESULT_CHECK) // timedelta(weeks=1) + 1)
+
+
+class PredictionWindowError(ValueError):
+    """현재 시각으로 사전 확정할 수 없는 회차."""
+
+
+def verify_prediction_window(target, now=None):
+    """공식 결과 조회 기준과 별도로 해당 회차 토요일 20시부터 확정을 막는다."""
+    current = _korean_time(now)
+    expected = latest_completed_draw(current) + 1
+    if isinstance(target, bool) or not isinstance(target, Integral) or target != expected:
+        raise PredictionWindowError(f"현재 검토 대상은 {expected}회입니다. 요청한 {target}회는 확정할 수 없습니다.")
+    deadline = FIRST_RESULT_CHECK.replace(hour=20) + timedelta(weeks=expected - 1)
+    if current >= deadline:
+        raise PredictionWindowError(f"{target}회 판매 마감({deadline:%Y-%m-%d %H:%M} 한국시간)이 지났습니다.")
+    return expected
 
 
 def verify_latest_result(history, fetch_draw, expected_round=None):
     """전체 저장 이력을 검증하고 마지막 회차 핵심 필드가 공식 응답과 같은지 확인한다."""
+    from lotto_validation import validate_draw, validate_history
+
     latest = validate_history(history)[-1]
     if expected_round is not None and latest["회차"] != expected_round:
         raise ValueError(f"최신 당첨 결과가 필요합니다: {expected_round}회 (현재 {latest['회차']}회)")

@@ -13,10 +13,10 @@ from pathlib import Path
 import pandas as pd
 
 from lotto_portfolio import (NUMBER_COLUMNS, combination_hit_diagnostics,
-                             portfolio_diagnostics, review_probabilities, ticket_hits)
+                             portfolio_diagnostics, review_probabilities)
 from lotto_validation import strict_int, validate_draw, validate_history
-from lotto_storage import load_history, load_predictions, validate_prediction_history
-from lotto_weekly import latest_completed_draw
+from lotto_storage import load_history, load_predictions, prediction_evaluation, validate_prediction_history
+from lotto_weekly import PredictionWindowError, latest_completed_draw, verify_prediction_window
 
 
 def compare_saved_predictions(history, predictions):
@@ -37,19 +37,25 @@ def compare_saved_predictions(history, predictions):
                   "set_ids": group["세트"].tolist(), **portfolio_diagnostics(tickets)}
         if target in actuals:
             actual = actuals[target]
-            hits = ticket_hits(tickets, [actual[c] for c in NUMBER_COLUMNS])
-            bonus = [int(actual["보너스"] in row) for row in tickets]
+            actual_numbers = [actual[c] for c in NUMBER_COLUMNS]
+            evaluations = [prediction_evaluation(ticket, actual_numbers, actual["보너스"])
+                           for ticket in tickets]
+            hits = [result["본번호일치수"] for result in evaluations]
+            bonus = [result["보너스일치"] for result in evaluations]
             record.update(actual=actual, main_hits=hits, bonus_hits=bonus,
                           best_main_hits=max(hits), mean_main_hits=sum(hits) / len(hits),
                           zero_hit_sets=hits.count(0))
-            record.update(combination_hit_diagnostics(tickets, [actual[c] for c in NUMBER_COLUMNS]))
+            record.update(combination_hit_diagnostics(tickets, actual_numbers))
             stale = []
-            for (_, row), main, extra in zip(group.iterrows(), hits, bonus):
-                for column, expected in [("본번호일치수", main), ("보너스일치", extra),
-                                         ("총일치수", main + extra)]:
-                    if column in row and pd.notna(row[column]) and strict_int(row[column]) != expected:
+            for (_, row), evaluation in zip(group.iterrows(), evaluations):
+                for column, expected in evaluation.items():
+                    value = row[column]
+                    if pd.isna(value) or (isinstance(value, str) and not value.strip()):
+                        continue
+                    stored = str(value) if isinstance(expected, str) else strict_int(value)
+                    if stored != expected:
                         stale.append({"set_id": int(row["세트"]), "column": column,
-                                      "stored": strict_int(row[column]), "correct": expected})
+                                      "stored": stored, "correct": expected})
             record["stored_evaluation_mismatches"] = stale
         else:
             record["status"] = "result_unavailable"
@@ -57,12 +63,12 @@ def compare_saved_predictions(history, predictions):
     return records
 
 
-def audit(app, offline=False):
+def audit(app, offline=False, *, now=None):
     """두 CSV 검증을 먼저 끝낸 후 조회한다. 일부 조회 실패는 보고 상태에 명시한다."""
     history_path, prediction_path = Path(app.CSV_FILE), Path(app.PREDICTION_FILE)
     history = load_history(history_path)
     predictions = load_predictions(prediction_path, missing_ok=True)
-    expected = latest_completed_draw()
+    expected = latest_completed_draw(now)
     official_status, unavailable = "offline", []
     if not offline:
         # Verify the stored last row as well as collect every missing round.
@@ -86,10 +92,18 @@ def audit(app, offline=False):
     comparisons = compare_saved_predictions(history, predictions)
     print("Reviewing methods on chronological historical prefixes...", flush=True)
     _, review = review_probabilities(history, app.calculate_analysis_scores)
-    report = {"mode": "audit_only_no_new_tickets", "checked_at": datetime.now(timezone.utc).isoformat(),
-              "expected_completed_draw": expected, "available_completed_draw": int(history["회차"].max()),
+    available = int(history["회차"].max())
+    checked_at = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
+    window_error = None
+    try:
+        verify_prediction_window(available + 1, checked_at)
+    except PredictionWindowError as error:
+        window_error = str(error)
+    report = {"mode": "audit_only_no_new_tickets", "checked_at": checked_at.isoformat(),
+              "expected_completed_draw": expected, "available_completed_draw": available,
               "official_status": official_status, "unavailable_rounds": unavailable,
-              "ready_for_generation": official_status == "matched" and int(history["회차"].max()) == expected,
+              "prediction_window_error": window_error,
+              "ready_for_generation": official_status == "matched" and available == expected and window_error is None,
               "input_history_sha256": hashlib.sha256(history_path.read_bytes()).hexdigest(),
               "input_predictions_sha256": hashlib.sha256(prediction_path.read_bytes()).hexdigest()
               if prediction_path.exists() else None,

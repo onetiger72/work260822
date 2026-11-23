@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 import runpy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -37,6 +37,20 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(report["main_hits"], [5])
         self.assertEqual(report["bonus_hits"], [1])
         self.assertEqual(report["stored_evaluation_mismatches"][0]["correct"], 5)
+
+    def test_audit_checks_filled_actual_numbers_bonus_prize_and_status(self):
+        history = dated_history(1)
+        actual = sorted(int(history.at[0, f"번호{i}"]) for i in range(1, 7))
+        bonus = int(history.at[0, "보너스"])
+        wrong = next(n for n in range(1, 46) if n not in actual and n != bonus)
+        predictions = pd.DataFrame([{
+            "예측회차": 1, "세트": 1, "실제보너스": wrong, "당첨등수": "5등", "평가상태": "대기",
+            **{f"번호{i}": n for i, n in enumerate(actual, 1)},
+            **{f"실제번호{i}": n for i, n in enumerate([wrong] + actual[1:], 1)}
+        }])
+        stale = compare_saved_predictions(history, predictions)[0]["stored_evaluation_mismatches"]
+        self.assertEqual({r["column"]: r["correct"] for r in stale},
+                         {"실제번호1": actual[0], "실제보너스": bonus, "당첨등수": "1등", "평가상태": "평가완료"})
 
     def test_saved_and_feedback_reports_distinguish_scattered_six_from_exact_six(self):
         from benchmark_audit import load_module
@@ -74,8 +88,8 @@ class AuditTests(unittest.TestCase):
                                   get_lotto_draw=Mock(side_effect=lambda n: history.iloc[n - 1].to_dict()),
                                   calculate_analysis_scores=lambda _: {},
                                   generate_prediction_sets=Mock(side_effect=AssertionError("no tickets")))
-            with patch("audit_predictions.latest_completed_draw", return_value=4):
-                report = audit(app)
+            before_cutoff = datetime(2003, 1, 4, 10, 59, tzinfo=timezone.utc)
+            report = audit(app, now=before_cutoff)
             self.assertTrue(report["ready_for_generation"])
             self.assertEqual(report["comparisons"][0]["main_hits"], [6])
             self.assertEqual(report["logic_review"]["target_draw"], 5)
@@ -83,10 +97,14 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(before, [p.read_bytes() for p in (history_path, prediction_path)])
             self.assertEqual({p.name for p in root.iterdir()}, {"history.csv", "predictions.csv"})
             app.generate_prediction_sets.assert_not_called()
+            # 같은 4회 결과를 공식 대조해도 한국시간 토요일 20시에는 5회 접수가 닫힌다.
+            closed = audit(app, now=before_cutoff + timedelta(minutes=1))
+            self.assertEqual(closed["official_status"], "matched")
+            self.assertFalse(closed["ready_for_generation"])
+            self.assertIn("판매 마감", closed["prediction_window_error"])
             app.get_lotto_draw.return_value = None
             app.get_lotto_draw.side_effect = None
-            with patch("audit_predictions.latest_completed_draw", return_value=4):
-                report = audit(app)
+            report = audit(app, now=before_cutoff)
             self.assertFalse(report["ready_for_generation"])
             self.assertEqual(report["official_status"], "unavailable")
             self.assertEqual({p.name for p in root.iterdir()}, {"history.csv", "predictions.csv"})

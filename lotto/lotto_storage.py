@@ -2,11 +2,15 @@
 
 파일 부재만 빈 이력으로 취급한다. 기존 파일의 파싱/검증 실패를 빈 표로
 바꾸면 호출자가 원본을 신규 자료로 덮어쓸 수 있으므로 복구를 시도하지 않는다.
-이 모듈은 읽기와 메모리 검증만 담당하며 중간 파일을 만들지 않는다.
+저장은 같은 디렉터리에서 완성한 임시 파일을 원자적으로 교체한다.
 """
 import csv
+import hashlib
 import io
 import math
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +19,8 @@ from lotto_validation import NUMBERS, strict_int, validate_history
 
 ACTUAL_COLUMNS = [f"실제번호{i}" for i in range(1, 7)]
 PREDICTION_COLUMNS = (["예측회차", "세트"] + NUMBERS + ["종합점수"]
-                      + ACTUAL_COLUMNS + ["본번호일치수", "보너스일치", "총일치수"])
+                      + ACTUAL_COLUMNS + ["실제보너스", "본번호일치수", "보너스일치",
+                                          "총일치수", "당첨등수", "평가상태"])
 HISTORY_COLUMNS = ["회차", "날짜"] + NUMBERS + ["보너스"]
 
 
@@ -23,21 +28,72 @@ class CsvDataError(ValueError):
     """원본 보존을 위해 수집·생성·저장을 중단해야 하는 CSV 오류."""
 
 
-def read_csv_checked(filename, *, missing_ok=False):
-    """UTF-8 CSV를 원래 문자열로 읽는다. 반환값 None은 파일 부재만 뜻한다.
-
-    pandas의 헤더 중복 자동 변경과 소수/빈 값의 묵시적 변환을 피하기 위해
-    CSV 구조를 먼저 확인한다. 필드 수 불일치도 행을 버리지 않고 거부한다.
-    """
+def _read_csv_bytes(filename, missing_ok):
     path = Path(filename)
     try:
-        raw = path.read_bytes()
+        return path.read_bytes()
     except FileNotFoundError:
         if missing_ok:
             return None
         raise CsvDataError(f"필수 CSV 파일이 없습니다: {path.name}") from None
     except OSError as error:
         raise CsvDataError(f"CSV 읽기 실패, 원본을 보존합니다: {path.name}") from error
+
+
+def csv_sha256(filename, *, missing_ok=False):
+    raw = _read_csv_bytes(filename, missing_ok)
+    return None if raw is None else hashlib.sha256(raw).hexdigest()
+
+
+@contextmanager
+def _csv_write_lock(path):
+    """협력하는 writer들을 직렬화한다. 프로세스가 종료되면 OS가 잠금을 해제한다."""
+    if os.name == "nt":
+        # O_TEMPORARY removes the lock on last close, including process termination.
+        lock = path.with_name(f".{path.name}.lock")
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_TEMPORARY)
+    else:
+        import fcntl
+        descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        if os.name != "nt":
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def write_csv_atomic(frame, filename, *, expected_sha256, before_replace=None):
+    """원본 해시와 호출자의 최종 조건을 잠금 안에서 확인한 뒤 CSV를 교체한다."""
+    path = Path(filename)
+    staged = None
+    try:
+        with _csv_write_lock(path):
+            with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8-sig",
+                                             dir=path.parent, prefix=f".{path.name}.",
+                                             suffix=".tmp", delete=False) as output:
+                staged = Path(output.name)
+                frame.to_csv(output, index=False)
+                output.flush()
+                os.fsync(output.fileno())
+            if csv_sha256(path, missing_ok=True) != expected_sha256:
+                raise CsvDataError(f"검토 후 CSV가 변경되었습니다. 다시 읽어 주세요: {path.name}")
+            if before_replace is not None:
+                before_replace()
+            os.replace(staged, path)
+    except OSError as error:
+        raise CsvDataError(f"CSV를 저장하지 못했습니다: {path.name}: {error}") from error
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+
+
+def read_csv_checked(filename, *, missing_ok=False):
+    """원본 문자열·열 순서를 유지한다. 반환값 None은 파일 부재만 뜻한다."""
+    path = Path(filename)
+    raw = _read_csv_bytes(path, missing_ok)
+    if raw is None:
+        return None
     try:
         rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig")), strict=True))
         if not rows or not rows[0] or any(not name.strip() for name in rows[0]):
@@ -47,7 +103,9 @@ def read_csv_checked(filename, *, missing_ok=False):
         if any(len(row) != len(rows[0]) for row in rows[1:]):
             raise ValueError("inconsistent CSV field count")
         # 문자열을 그대로 전달하므로 '1.9'가 검증 전에 1로 바뀌지 않는다.
-        return pd.DataFrame(rows[1:], columns=rows[0], dtype=object)
+        frame = pd.DataFrame(rows[1:], columns=rows[0], dtype=object)
+        frame.attrs["source_sha256"] = hashlib.sha256(raw).hexdigest()
+        return frame
     except (UnicodeError, csv.Error, ValueError) as error:
         raise CsvDataError(f"CSV 형식 오류, 원본을 보존합니다: {path.name}: {error}") from error
 
@@ -74,8 +132,25 @@ def _missing(value):
     return (isinstance(value, str) and not value.strip()) or pd.isna(value)
 
 
+def prize_name(main_hits, bonus_hit):
+    if main_hits == 5:
+        return "2등" if bonus_hit else "3등"
+    return {6: "1등", 4: "4등", 3: "5등"}.get(main_hits, "낙첨")
+
+
+def prediction_evaluation(ticket, actual_numbers, actual_bonus):
+    """검증된 한 세트와 실제 추첨에서 CSV의 평가 열 전체를 계산한다."""
+    ticket = set(ticket)
+    actual = sorted(actual_numbers)
+    main_hits = len(ticket.intersection(actual))
+    bonus_hit = int(actual_bonus in ticket)
+    return {**dict(zip(ACTUAL_COLUMNS, actual)), "실제보너스": actual_bonus,
+            "본번호일치수": main_hits, "보너스일치": bonus_hit, "총일치수": main_hits + bonus_hit,
+            "당첨등수": prize_name(main_hits, bonus_hit), "평가상태": "평가완료"}
+
+
 def validate_prediction_history(frame):
-    """예측의 신원을 확인하고 고정 CSV 스키마로 반환한다.
+    """원본 열과 순서를 유지하고 예전 파일에 없는 표준 평가 열을 추가한다.
 
     회차·세트·본번호는 필수이며 임의 생성하지 않는다. 과거 기록의 숫자 순서도
     보존한다. 평가 열은 아직 발표 전이면 비어 있어도 되지만 값이 있으면 정수와
@@ -106,9 +181,9 @@ def validate_prediction_history(frame):
         for column in PREDICTION_COLUMNS:
             if column not in result:
                 result[column] = pd.NA
-        for column in ACTUAL_COLUMNS + ["본번호일치수", "보너스일치", "총일치수"]:
-            maximum = 45 if column in ACTUAL_COLUMNS else {"본번호일치수": 6, "보너스일치": 1, "총일치수": 7}[column]
-            minimum = 1 if column in ACTUAL_COLUMNS else 0
+        ranges = {column: (1, 45) for column in ACTUAL_COLUMNS + ["실제보너스"]}
+        ranges.update({"본번호일치수": (0, 6), "보너스일치": (0, 1), "총일치수": (0, 7)})
+        for column, (minimum, maximum) in ranges.items():
             values = []
             for value in result[column]:
                 if _missing(value):
@@ -136,7 +211,7 @@ def validate_prediction_history(frame):
         result["종합점수"] = pd.array(scores, dtype="Float64")
     except (ValueError, KeyError, TypeError, OverflowError) as error:
         raise CsvDataError(f"예측 이력 검증 실패, 원본을 보존합니다: {error}") from error
-    return result[PREDICTION_COLUMNS].sort_values(["예측회차", "세트"]).reset_index(drop=True)
+    return result.sort_values(["예측회차", "세트"]).reset_index(drop=True)
 
 
 def load_predictions(filename, *, missing_ok=False):

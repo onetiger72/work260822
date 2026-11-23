@@ -24,7 +24,7 @@
 #   결합하여 후보 조합을 체계적으로 순위화하는 휴리스틱 분석 도구입니다.
 #
 # 사용 방법
-# - 아래 QUERY_ROUND에 실제 조회할 로또 회차를 입력합니다.
+# - 기본 실행은 두 생성기를 비교합니다. --review-session으로 대화 중 검토를 이어갑니다.
 #
 # 필요 라이브러리
 # pip install requests pandas
@@ -1050,9 +1050,11 @@ def generate_prediction_sets(
         num_gaps[n] = gaps
 
     cycle_score = {}
+    cur_gaps = {}
     for n in range(1, 46):
         idxs = appear_indices[n]
         cur_g = (total_draws - 1 - idxs[-1]) if idxs else total_draws
+        cur_gaps[n] = cur_g
         g_cap = min(cur_g, 35)
         emp_hazard = (gap_appear[g_cap] + 1.0) / (gap_survive[g_cap] + 7.5)
         recent_g = num_gaps[n][-12:]
@@ -1070,6 +1072,7 @@ def generate_prediction_sets(
     last1_nums = draws_main[-1]
     last1_bns = draws_bonus[-1]
     last2_nums = draws_main[-2] if total_draws >= 2 else ()
+    last2_bns = draws_bonus[-2] if total_draws >= 2 else -1
     last3_nums = draws_main[-3] if total_draws >= 3 else ()
 
     transition_score = {}
@@ -1090,7 +1093,208 @@ def generate_prediction_sets(
         )
 
     # ========================================================
-    # D. 이월수 / 이웃수(±1) / 징검다리 / 최근 끝수 활성도 점수
+    # D. SQUAD 1 (세트 1~5): 교차 브릿지(Cross-Parent Bridge) & 공명 이월 클리크 압축
+    # (직전·전전 회차 끝수 점프 + 이웃수(±1, ±2) 교차점 및 공명 이월수를 9개 고밀도 풀로 압축)
+    # ========================================================
+    p1_main = set(last1_nums)
+    p1_bns = last1_bns
+    p1_all = p1_main | {p1_bns}
+    p2_main = set(last2_nums)
+    p2_all = p2_main | ({last2_bns} if last2_bns > 0 else set())
+
+    r10 = Counter(n for d in draws_main[-10:] for n in d)
+    r30 = Counter(n for d in draws_main[-30:] for n in d)
+
+    # 단기 극과열 부모(최근 10회 중 5회 이상 출현)는 단기 에너지를 소진했으므로 파생 브릿지 부모에서 제외
+    active_p1_main = {p for p in p1_main if r10[p] < 5}
+    active_p1_all = {p for p in p1_all if r10[p] < 5}
+    p1_end_counts = Counter(p % 10 for p in p1_all)
+    p12_end_decades = {
+        end_d: len({(p - 1) // 10 for p in (active_p1_all | p2_all) if p % 10 == end_d})
+        for end_d in range(10)
+    }
+
+    bridge_scores = {}
+    for n in range(1, 46):
+        g = cur_gaps[n]
+        end_parents = {p for p in active_p1_all if (p % 10) == (n % 10) and p != n}
+        nbr1_main = {p for p in active_p1_main if abs(n - p) == 1}
+        nbr1_all = {p for p in active_p1_all if abs(n - p) == 1}
+        nbr2_all = {p for p in active_p1_all if abs(n - p) == 2}
+        in_p1 = (n in p1_all)
+        in_p2_main = (n in p2_main and not in_p1)
+        in_p2 = (n in p2_all and not in_p1)
+
+        cross_decade_end = {p for p in end_parents if (p - 1) // 10 != (n - 1) // 10}
+        local_nbrs = nbr1_all | nbr2_all
+        dec = (n - 1) // 10
+        dec_p1_cnt = sum(1 for p in p1_all if (p - 1) // 10 == dec)
+        is_overcrowded_interior = (
+            (not in_p1)
+            and dec_p1_cnt >= 4
+            and any(p < n for p in local_nbrs)
+            and any(p > n for p in local_nbrs)
+        )
+
+        score = 0.0
+        if in_p1:
+            is_middle_of_triple = ((n - 1) in p1_main and (n + 1) in p1_main)
+            end_saturated_pen = -0.75 if p1_end_counts[n % 10] >= 3 else 0.0
+            middle_pen = -0.55 if is_middle_of_triple else 0.0
+            resonance = (
+                len(nbr1_all) * 0.45
+                + len(cross_decade_end) * 0.40
+                + (0.35 if n == p1_bns else 0.0)
+                + end_saturated_pen
+                + middle_pen
+            )
+            if 1 <= r30[n] <= 6 or n == p1_bns:
+                score += 4.25 + resonance + 0.10 * min(r30[n], 6)
+            else:
+                score += 2.40 + resonance
+        else:
+            reb_boost = 0.38 if 8 <= g <= 25 else 0.0
+            if cross_decade_end and nbr1_main:
+                score += (2.6 if is_overcrowded_interior else 4.95 + reb_boost) + 0.35 * len(cross_decade_end)
+            elif cross_decade_end and local_nbrs:
+                score += (2.5 if is_overcrowded_interior else 4.68 + reb_boost) + 0.35 * len(cross_decade_end)
+            elif nbr1_main and nbr2_all and not is_overcrowded_interior:
+                score += 4.65 + reb_boost + 0.20 * len(local_nbrs)
+            elif cross_decade_end and in_p2:
+                p2_boost = 0.25 if in_p2_main else 0.0
+                score += 4.40 + p2_boost + 0.35 * len(cross_decade_end)
+            elif len(cross_decade_end) >= 2:
+                active_dec_boost = 0.45 if dec_p1_cnt >= 2 else 0.0
+                score += 4.35 + active_dec_boost + 0.35 * len(cross_decade_end)
+            elif cross_decade_end and p12_end_decades[n % 10] >= 3 and not any((p - 1) // 10 == dec and p % 10 == n % 10 for p in (active_p1_all | p2_all)):
+                score += 4.70 + (0.35 if 1 <= g <= 4 else 0.0)
+            elif nbr1_main and in_p2 and not is_overcrowded_interior:
+                score += 4.10
+            elif nbr2_all and r10[n] >= 2 and 2 <= r30[n] <= 5 and not is_overcrowded_interior:
+                fresh_nbr2 = 0.15 if any(r10[p] <= 2 for p in nbr2_all) else 0.0
+                score += 4.25 + fresh_nbr2
+            elif nbr1_all and 2 <= r30[n] <= 6:
+                score += (2.2 if is_overcrowded_interior else 3.20 + reb_boost)
+            elif cross_decade_end and (2 <= r30[n] <= 6 or 1 <= g <= 4):
+                score += 3.00 + (0.25 if 1 <= g <= 3 else 0.0)
+            elif in_p2 and 3 <= r30[n] <= 6:
+                score += 2.60
+
+            if r30[n] >= 7:
+                score *= 0.45
+
+        bridge_scores[n] = score + 0.07 * min(r30[n], 6)
+
+    ranked_b = sorted(bridge_scores.items(), key=lambda x: x[1], reverse=True)
+    top_bridge = []
+    carry_cnt = 0
+    carry_per_dec = Counter()
+    dec_cnt = Counter()
+    end_cnt = Counter()
+
+    for n, sc in ranked_b:
+        dec = (n - 1) // 10
+        end_d = n % 10
+        if n in p1_all:
+            if carry_cnt >= 2 or carry_per_dec[dec] >= 1:
+                continue
+        if dec_cnt[dec] >= 4:
+            continue
+        if end_cnt[end_d] >= 3:
+            continue
+        top_bridge.append(n)
+        if n in p1_all:
+            carry_cnt += 1
+            carry_per_dec[dec] += 1
+        dec_cnt[dec] += 1
+        end_cnt[end_d] += 1
+        if len(top_bridge) >= 10:
+            break
+
+    bridge_pool_9 = top_bridge[:9]
+    bridge_combs = []
+    for comb in combinations(sorted(bridge_pool_9), 6):
+        c_set = set(comb)
+        if len(c_set & p1_all) > 2:
+            continue
+        s = sum(comb)
+        if not (90 <= s <= 195):
+            continue
+        odds = sum(1 for x in comb if x % 2 == 1)
+        if odds in (0, 6):
+            continue
+        decs = Counter((x - 1) // 10 for x in comb)
+        if max(decs.values()) >= 4 or len(decs) < 3:
+            continue
+
+        node_s = sum(bridge_scores[x] + 0.35 * cycle_score[x] for x in comb)
+        end_digits = Counter(x % 10 for x in comb)
+        same_end_pairs = sum(1 for v in end_digits.values() if v == 2)
+        end_syn = 1.15 if same_end_pairs >= 1 else 0.0
+        if max(end_digits.values()) >= 3:
+            end_syn -= 1.5
+
+        consec = sum(1 for i in range(5) if comb[i + 1] - comb[i] == 1)
+        consec_syn = 0.85 if consec == 1 else (-1.2 if consec >= 2 else 0.0)
+        dec_syn = 0.35 if (len(decs) >= 4 and max(decs.values()) <= 2) else 0.0
+        top7_hits = len(c_set & set(top_bridge[:7]))
+        top7_bonus = 0.45 * top7_hits
+
+        total_b_score = node_s + end_syn + consec_syn + dec_syn + top7_bonus
+        bridge_combs.append((total_b_score, tuple(sorted(comb))))
+
+    bridge_combs.sort(key=lambda x: x[0], reverse=True)
+    squad1_count = min(5, set_count)
+    squad1_selected = []
+    covered_b3 = set()
+    covered_b4 = set()
+
+    top7_combs = [item for item in bridge_combs if len(set(item[1]) & set(top_bridge[:7])) >= 5]
+    if top7_combs:
+        sc0, c1 = top7_combs[0]
+        squad1_selected.append((c1, sc0 / 50.0))
+        for t3 in combinations(c1, 3):
+            covered_b3.add(t3)
+        for t4 in combinations(c1, 4):
+            covered_b4.add(t4)
+
+    while len(squad1_selected) < squad1_count and bridge_combs:
+        best_c = None
+        best_sc = 0.0
+        best_val = -1e9
+        use_t4_fusion = (len(squad1_selected) >= 3)
+        for sc, comb in bridge_combs:
+            if any(comb == ex for ex, _ in squad1_selected):
+                continue
+            max_ov = max((len(set(comb) & set(ex)) for ex, _ in squad1_selected), default=0)
+            if max_ov >= 5:
+                continue
+            if use_t4_fusion:
+                new_t4 = sum(1 for t4 in combinations(comb, 4) if t4 not in covered_b4)
+                val = sc + 0.85 * new_t4
+            else:
+                new_t3 = sum(1 for t3 in combinations(comb, 3) if t3 not in covered_b3)
+                val = sc + 0.55 * new_t3
+            if val > best_val:
+                best_val = val
+                best_c = comb
+                best_sc = sc
+        if best_c is None:
+            for sc, comb in bridge_combs:
+                if not any(comb == ex for ex, _ in squad1_selected):
+                    best_c = comb
+                    best_sc = sc
+                    break
+        if best_c is None:
+            break
+        squad1_selected.append((best_c, best_sc / 50.0))
+        for t3 in combinations(best_c, 3):
+            covered_b3.add(t3)
+        for t4 in combinations(best_c, 4):
+            covered_b4.add(t4)
+
+    # ========================================================
+    # E. SQUAD 2 (세트 6~10): 이월수 / 이웃수 / 징검다리 / 마르코프 다중주기 클리크
     # ========================================================
     recent_endings = Counter(
         n % 10 for r in draws_main[-4:] for n in r
@@ -1115,7 +1319,7 @@ def generate_prediction_sets(
             val += 0.48
         elif n in nbr_bns:
             val += 0.30
-        if n in last2_set:
+        if n in last2_set and n not in last1_set:
             val += 0.25
         val += min(recent_endings[n % 10] / 6.0, 0.35)
         pattern_score[n] = val
@@ -1396,24 +1600,26 @@ def generate_prediction_sets(
     )
 
     # ========================================================
-    # I. 3-tuple / 4-tuple 커버링(Wheeling) 기반 상위 10세트 압축 선택
-    # (맞힌 번호들이 서로 다른 게임으로 찢어지지 않고 한 줄 안에 모이도록 배치)
+    # I. 3-tuple / 4-tuple 커버링(Wheeling) 기반 Squad 2 (세트 6~10) 압축 및 통합
     # ========================================================
-    selected_sets = []
+    squad2_selected = []
     covered_3tuples = set()
     covered_4tuples = set()
 
-    for _ in range(set_count):
+    for _ in range(max(0, set_count - len(squad1_selected))):
         best_item = None
         best_obj = -1.0
 
         for comb, base_score in ranked_all[:500]:
-            if any(comb == ex for ex, _ in selected_sets):
+            if (
+                any(comb == ex for ex, _ in squad1_selected)
+                or any(comb == ex for ex, _ in squad2_selected)
+            ):
                 continue
 
             if any(
                 len(set(comb) & set(ex)) >= 5
-                for ex, _ in selected_sets
+                for ex, _ in squad2_selected
             ):
                 continue
 
@@ -1428,8 +1634,8 @@ def generate_prediction_sets(
 
             obj = (
                 base_score
-                + 0.004 * (new_3s / 20.0)
-                + 0.003 * (new_4s / 15.0)
+                + 0.024 * (new_3s / 20.0)
+                + 0.012 * (new_4s / 15.0)
             )
             if obj > best_obj:
                 best_obj = obj
@@ -1437,16 +1643,21 @@ def generate_prediction_sets(
 
         if best_item is None:
             for comb, base_score in ranked_all:
-                if not any(comb == ex for ex, _ in selected_sets):
+                if (
+                    not any(comb == ex for ex, _ in squad1_selected)
+                    and not any(comb == ex for ex, _ in squad2_selected)
+                ):
                     best_item = (comb, base_score)
                     break
 
         if best_item is not None:
-            selected_sets.append(best_item)
+            squad2_selected.append(best_item)
             for sub3 in combinations(best_item[0], 3):
                 covered_3tuples.add(sub3)
             for sub4 in combinations(best_item[0], 4):
                 covered_4tuples.add(sub4)
+
+    selected_sets = squad1_selected + squad2_selected
 
     # ========================================================
     # J. 결과 DataFrame
@@ -2107,118 +2318,10 @@ def print_summary(
 # ============================================================
 
 def main():
+    """F5와 명령줄 모두 공식 회차 확인과 동일한 후보 검토를 거친다."""
+    import runpy
+    return runpy.run_path(os.path.join(BASE_DIR, "로또 당첨번호 예측.py"), run_name="__main__")
 
-    # --------------------------------------------------------
-    # STEP 1
-    # 조회 회차와 CSV 마지막 회차 비교 후 필요한 신규 회차만 수집
-    # --------------------------------------------------------
-
-    df = collect_all_lotto(
-        query_round=QUERY_ROUND,
-        start_draw=1,
-        sleep_time=0.10
-    )
-
-    if df.empty:
-        print("데이터를 가져오지 못했습니다.")
-        return
-
-    df = (
-        df
-        .sort_values("회차")
-        .reset_index(drop=True)
-    )
-
-    # --------------------------------------------------------
-    # STEP 2
-    # 전 회차 분석용 파생변수 생성
-    # --------------------------------------------------------
-
-    df = create_features(df)
-
-    # --------------------------------------------------------
-    # STEP 3
-    # 본번호 6개 + 보너스 번호의 전 회차 빈도 분석
-    # --------------------------------------------------------
-
-    frequency_df = (
-        calculate_frequency(df)
-    )
-
-    # --------------------------------------------------------
-    # STEP 4
-    # 최근 100회 화면 참고 분석
-    # --------------------------------------------------------
-
-    recent_frequency_df = (
-        calculate_recent_frequency(
-            df,
-            recent_count=100
-        )
-    )
-
-    # --------------------------------------------------------
-    # STEP 5
-    # 전 회차 기준 미출현 기간 분석
-    # --------------------------------------------------------
-
-    missing_df = (
-        calculate_missing_draws(df)
-    )
-
-
-    # --------------------------------------------------------
-    # STEP 6
-    # 이전에 생성한 예상번호와 실제 당첨번호 자동 비교/평가
-    # --------------------------------------------------------
-
-    evaluated_prediction_df = evaluate_prediction_history(
-        df,
-        filename=PREDICTION_FILE
-    )
-
-    # --------------------------------------------------------
-    # STEP 7
-    # 현재 실제 최종 회차 + 1 회차의 예상번호 10세트 생성
-    # --------------------------------------------------------
-
-    prediction_df = save_prediction_sets(
-        df,
-        filename=PREDICTION_FILE
-    )
-
-    # --------------------------------------------------------
-    # STEP 7
-    # 분석 결과 자체는 별도 CSV로 저장하지 않음
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-    # STEP 8
-    # 분석 결과 화면 출력
-    # --------------------------------------------------------
-
-    print_summary(
-
-        df,
-
-        frequency_df,
-
-        recent_frequency_df,
-
-        missing_df
-    )
-
-    print()
-    print("=" * 70)
-    print("데이터 처리 완료")
-    print("=" * 70)
-    print(f"당첨 이력 CSV : {CSV_FILE}")
-    print("예상번호는 회차별로 당첨예상번호.csv에 누적 저장하고, 실제 결과 발표 후 자동 비교/평가합니다.")
-
-
-# ============================================================
-# 프로그램 실행
-# ============================================================
 
 if __name__ == "__main__":
 

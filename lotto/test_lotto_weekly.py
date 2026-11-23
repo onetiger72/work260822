@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 
 import lotto_portfolio as portfolio
-from lotto_weekly import latest_completed_draw, verify_latest_result
+from lotto_weekly import latest_completed_draw, verify_latest_result, verify_prediction_window
 from test_lotto_portfolio import make_history
 
 
@@ -14,6 +14,19 @@ class WeeklyTests(unittest.TestCase):
         korea = timezone(timedelta(hours=9))
         self.assertEqual(latest_completed_draw(datetime(2026, 9, 19, 20, 59, tzinfo=korea)), 1241)
         self.assertEqual(latest_completed_draw(datetime(2026, 9, 19, 21, 0, tzinfo=korea)), 1242)
+
+    def test_purchase_cutoff_precedes_result_check(self):
+        # UTC inputs also use Korea's Saturday deadline.
+        def at(hour, minute):
+            return datetime(2026, 9, 19, hour, minute, tzinfo=timezone.utc)
+
+        self.assertEqual(verify_prediction_window(1242, at(10, 59)), 1242)
+        for hour, minute in [(11, 0), (11, 59), (12, 0)]:
+            with self.subTest(hour=hour, minute=minute), self.assertRaises(ValueError):
+                verify_prediction_window(1242, at(hour, minute))
+        with self.assertRaises(ValueError):
+            verify_prediction_window(1243, at(11, 59))
+        self.assertEqual(verify_prediction_window(1243, at(12, 0)), 1243)
 
     def test_source_unavailable_mismatch_and_stale_history_block_generation(self):
         history = make_history(3)
