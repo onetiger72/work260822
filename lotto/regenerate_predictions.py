@@ -45,9 +45,12 @@ def main():
         candidate.update({column: int(row[column]) for column in ["세트"] + app.NUMBER_COLUMNS})
         candidate.update({"예측회차": args.target, "종합점수": float(row["종합점수"])})
         rows.append(candidate)
-    screened = evidence["selected"] == "screened"
-    model_file = "lotto_portfolio.py" if screened else "lotto.py"
-    prepared = {"target_draw": args.target, "version": evidence["screened_version"] if screened else "cluster",
+    model_file, version, score_semantics = {
+        "screened": ("lotto_portfolio.py", evidence["screened_version"], "model-estimated main hits per ticket"),
+        "cluster": ("lotto.py", "cluster", "cluster heuristic score"),
+        "shared_pairs": ("lotto_selection.py", "shared_pairs_uniform", "expected main hits per ticket under uniform 6/45"),
+    }[evidence["selected"]]
+    prepared = {"target_draw": args.target, "version": version,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "original_csv_sha256": hashlib.sha256(original_bytes).hexdigest(),
                 "history_sha256": hashlib.sha256(Path(app.CSV_FILE).read_bytes()).hexdigest(),
@@ -55,7 +58,7 @@ def main():
                 "columns": app.PREDICTION_FILE_COLUMNS, "rows": rows,
                 "weekly_review": generated.attrs.get("weekly_review"),
                 "selection_evidence": evidence,
-                "score_semantics": "model-estimated main hits per ticket" if screened else "cluster heuristic score"}
+                "score_semantics": score_semantics}
     proposal = json.load(sys.stdin) if args.manual_response else None
     result = final_review(history, pd.DataFrame(rows), predictions, app.get_lotto_draw,
                           expected_count=app.PREDICTION_SET_COUNT, manual_review=proposal,

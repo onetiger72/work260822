@@ -1,8 +1,14 @@
 """Exact portfolio coverage, including dependence between overlapping tickets."""
+from functools import partial
 from math import comb
 import unittest
+from unittest.mock import patch
 
+import numpy as np
+import lotto_portfolio as portfolio
 from lotto_coverage import coverage
+from lotto_selection import select_weekly_portfolio
+from test_lotto_portfolio import make_history
 
 
 class CoverageTests(unittest.TestCase):
@@ -49,6 +55,40 @@ class CoverageTests(unittest.TestCase):
         for batch in cases:
             with self.subTest(batch=batch), self.assertRaises(ValueError):
                 coverage(batch)
+
+    def test_uniform_ten_ticket_candidate_is_selected_by_exact_coverage(self):
+        history = make_history(1)
+        batches = []
+        for seed in (207, 207, 219):
+            generate = partial(portfolio.generate_prediction_sets, calculate_scores=lambda _: {}, random_seed=seed)
+            selected, evidence = select_weekly_portfolio(history, generate, set_count=10)
+            self.assertEqual(evidence["selected"], "shared_pairs")
+            candidate = evidence["compared"]["shared_pairs"]
+            tickets = selected[portfolio.NUMBER_COLUMNS].values.tolist()
+            self.assertEqual(tickets, candidate["tickets"])
+            self.assertEqual(len({tuple(sorted(ticket)) for ticket in tickets}), 10)
+            self.assertTrue(all(len(set(ticket)) == 6 for ticket in tickets))
+            self.assertEqual(set().union(*tickets), set(range(1, 46)))
+            self.assertEqual(candidate["coverage"]["hit_counts"],
+                             {"3": 1_875_065, "4": 113_500, "5": 2_350, "6": 10})
+            self.assertEqual(selected.attrs["weekly_review"]["selection_policy"], "shared_pairs_uniform")
+            batches.append(tickets)
+        self.assertEqual(batches[0], batches[1])
+        self.assertNotEqual(batches[0], batches[2])
+
+    def test_shared_pairs_is_only_compared_for_ten_uniform_tickets(self):
+        history = make_history(1)
+        generate = partial(portfolio.generate_prediction_sets, calculate_scores=lambda _: {})
+        _, evidence = select_weekly_portfolio(history, generate, set_count=5)
+        self.assertNotIn("shared_pairs", evidence["compared"])
+
+        _, report = portfolio.review_probabilities(history, lambda _: {})
+        report["selected_strength"] = 1.0
+        probabilities = np.linspace(0.08, 2 * (6 / 45) - 0.08, 45)
+        with patch.object(portfolio, "review_probabilities", return_value=(probabilities, report)):
+            _, evidence = select_weekly_portfolio(history, generate, set_count=10)
+        self.assertEqual(evidence["screened_policy"], "top_distinct_whole_tickets")
+        self.assertNotIn("shared_pairs", evidence["compared"])
 
 
 if __name__ == "__main__":

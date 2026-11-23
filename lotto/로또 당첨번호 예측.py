@@ -1708,7 +1708,7 @@ def _print_new_evaluation_summary(
 
 def save_prediction_sets(df, filename=PREDICTION_FILE, manual_review=None, *,
                          interactive=False, now=None, history_path=None):
-    """두 생성기를 비교한 뒤 같은 후보의 검토가 통과한 경우에만 예측 파일을 저장한다."""
+    """같은 장수의 후보 묶음을 비교하고 최종 검토를 통과한 예측을 저장한다."""
     validated_history = validate_history(df)
     latest = validated_history[-1]["회차"]
     target = latest + 1
